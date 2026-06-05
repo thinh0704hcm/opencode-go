@@ -1,8 +1,10 @@
 package permission
 
 import (
+	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrUnknown is returned when a permission/request id is not pending.
@@ -81,4 +83,42 @@ func (s *Store) List() []Request {
 		out = append(out, Request{ID: r.ID, SessionID: r.SessionID, Permission: r.Permission})
 	}
 	return out
+}
+
+// Ask registers a new pending request (creating its reply channel) and returns it.
+func (s *Store) Ask(id, sessionID, permissionName string) *Request {
+	req := &Request{ID: id, SessionID: sessionID, Permission: permissionName, replyCh: make(chan string, 1)}
+	s.Register(req)
+	return req
+}
+
+// Wait blocks until the request is replied to, the timeout elapses, or ctx is
+// cancelled. On timeout or cancellation it removes the pending request and
+// returns "reject" (default-deny). Returns the normalized reply otherwise.
+func (s *Store) Wait(ctx context.Context, req *Request, timeout time.Duration) string {
+	select {
+	case r := <-req.replyCh:
+		return normalizeReply(r)
+	case <-time.After(timeout):
+		s.remove(req.ID)
+		return "reject"
+	case <-ctx.Done():
+		s.remove(req.ID)
+		return "reject"
+	}
+}
+
+func (s *Store) remove(id string) {
+	s.mu.Lock()
+	delete(s.requests, id)
+	s.mu.Unlock()
+}
+
+func normalizeReply(r string) string {
+	switch r {
+	case "once", "always", "reject":
+		return r
+	default:
+		return "reject"
+	}
 }

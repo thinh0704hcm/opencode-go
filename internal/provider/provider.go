@@ -1,11 +1,31 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ChatMessage is one message in the provider request.
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// Optional fields for sending tool results back to the model.
+	ToolCallID string `json:"tool_call_id,omitempty"` // when Role=="tool"
+	Name       string `json:"name,omitempty"`
+}
+
+// ToolSchema describes a tool the model may call.
+type ToolSchema struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"` // JSON schema
+}
+
+// ToolCall is a complete tool call emitted by the model.
+type ToolCall struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"` // accumulated arguments JSON
 }
 
 // ChatRequest is a streaming chat request (architecture §3.1).
@@ -13,6 +33,7 @@ type ChatRequest struct {
 	Model    string
 	Messages []ChatMessage
 	System   string
+	Tools    []ToolSchema
 }
 
 // ChatChunk is one streamed delta from the provider.
@@ -21,6 +42,7 @@ type ChatChunk struct {
 	ReasoningDelta string
 	FinishReason   string
 	Err            error
+	ToolCall       *ToolCall // non-nil when the model emitted a complete tool call
 }
 
 // Provider streams chat completions (architecture §3.1).

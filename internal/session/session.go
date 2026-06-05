@@ -33,11 +33,20 @@ type Message struct {
 
 // Part is a single content part of a message.
 type Part struct {
-	ID        string `json:"id"` // prt_*
-	MessageID string `json:"messageID"`
-	SessionID string `json:"sessionID"`
-	Type      string `json:"type"` // "text" | "reasoning" | ...
-	Text      string `json:"text,omitempty"`
+	ID        string     `json:"id"` // prt_*
+	MessageID string     `json:"messageID"`
+	SessionID string     `json:"sessionID"`
+	Type      string     `json:"type"` // "text" | "reasoning" | "tool" | ...
+	Text      string     `json:"text,omitempty"`
+	Tool      string     `json:"tool,omitempty"`
+	CallID    string     `json:"callID,omitempty"`
+	State     *PartState `json:"state,omitempty"`
+}
+
+// PartState holds tool-part execution status for "tool" parts.
+type PartState struct {
+	Status string `json:"status"` // pending|running|completed|error
+	Output string `json:"output,omitempty"`
 }
 
 // MessageWithParts is the {info, parts} shape returned by GET .../message.

@@ -10,6 +10,7 @@ import (
 	"github.com/opencode-go/opencode-go/internal/permission"
 	"github.com/opencode-go/opencode-go/internal/provider"
 	"github.com/opencode-go/opencode-go/internal/session"
+	"github.com/opencode-go/opencode-go/internal/tool"
 )
 
 // Version reported by /global/health for handshake parity (architecture §2.1).
@@ -23,6 +24,8 @@ type Server struct {
 	provider provider.Provider
 	model    string // default model id passed to the provider
 	logger   *slog.Logger
+	tools    *tool.Registry
+	workdir  string
 
 	http *http.Server
 }
@@ -32,6 +35,8 @@ type Options struct {
 	Provider provider.Provider
 	Model    string // default model id
 	Logger   *slog.Logger
+	Tools    *tool.Registry
+	Workdir  string
 }
 
 // New builds a Server with its in-memory bus, store, and permission gate.
@@ -40,6 +45,14 @@ func New(opts Options) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	tools := opts.Tools
+	if tools == nil {
+		tools = tool.NewDefaultRegistry()
+	}
+	workdir := opts.Workdir
+	if workdir == "" {
+		workdir = "."
+	}
 	return &Server{
 		bus:      event.NewBus(),
 		store:    session.NewStore(),
@@ -47,6 +60,8 @@ func New(opts Options) *Server {
 		provider: opts.Provider,
 		model:    opts.Model,
 		logger:   logger,
+		tools:    tools,
+		workdir:  workdir,
 	}
 }
 

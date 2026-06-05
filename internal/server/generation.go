@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
-	"github.com/opencode-go/opencode-go/internal/provider"
 	"github.com/opencode-go/opencode-go/internal/session"
 )
 
@@ -54,33 +53,7 @@ func (s *Server) runGenerationSync(sessionID, modelID string, texts []string) (s
 	messageID := asst.Info.ID
 	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
 
-	// Build the provider request from the prompt text parts.
-	req := provider.ChatRequest{
-		Model:    modelID,
-		Messages: []provider.ChatMessage{{Role: "user", Content: joinTexts(texts)}},
-	}
-
-	stream, err := s.provider.StreamChat(ctx, req)
-	if err != nil {
-		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": err.Error()}))
-		s.finishGeneration(sessionID, messageID)
-		s.bus.Publish(event.NewSessionIdle(sessionID))
-		return s.finalAssistantMessage(sessionID, messageID)
-	}
-
-	for chunk := range stream {
-		if chunk.Err != nil {
-			s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": chunk.Err.Error()}))
-			continue
-		}
-		if chunk.TextDelta != "" {
-			s.emitDelta(sessionID, messageID, "text", chunk.TextDelta)
-		}
-		if chunk.ReasoningDelta != "" {
-			s.emitDelta(sessionID, messageID, "reasoning", chunk.ReasoningDelta)
-		}
-		// FinishReason ends the (single, M1) turn; the stream also closes.
-	}
+	s.runAgentLoop(ctx, sessionID, messageID, modelID, texts)
 
 	// Final assistant message.updated (time.completed set) -> GUARANTEED.
 	s.finishGeneration(sessionID, messageID)
