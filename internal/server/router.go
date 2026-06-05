@@ -29,6 +29,33 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /permission/{requestID}/reply", s.handlePermissionReply)
 	mux.HandleFunc("POST /session/{sessionID}/permissions/{permissionID}", s.handlePermissionRespond)
 
+	// M2 boot/config + provider registry (real data; apiKey masked, §3.4/§3.5).
+	mux.HandleFunc("GET /config", s.handleConfigGet)
+	mux.HandleFunc("GET /config/providers", s.handleConfigProviders)
+	mux.HandleFunc("GET /provider", s.handleProvider)
+	mux.HandleFunc("GET /agent", s.handleAgent)
+
+	// M2 sub2 boot stubs: populated stubs.
+	mux.HandleFunc("GET /path", s.handlePath)
+	mux.HandleFunc("GET /project/current", s.handleProjectCurrent)
+	mux.HandleFunc("GET /provider/auth", s.handleProviderAuth)
+	mux.HandleFunc("GET /experimental/console", s.handleExperimentalConsole)
+
+	// M2 sub2 boot stubs: empty/exact-shape stubs.
+	mux.HandleFunc("GET /command", s.handleCommand)
+	mux.HandleFunc("GET /mcp", s.handleMCP)
+	mux.HandleFunc("GET /formatter", s.handleFormatter)
+	mux.HandleFunc("GET /lsp", s.handleLSP)
+	mux.HandleFunc("GET /session/status", s.handleSessionStatus)
+	mux.HandleFunc("GET /vcs", s.handleVCS)
+	mux.HandleFunc("GET /experimental/resource", s.handleExperimentalResource)
+	mux.HandleFunc("GET /experimental/workspace", s.handleExperimentalWorkspace)
+	mux.HandleFunc("GET /experimental/workspace/status", s.handleExperimentalWorkspaceStatus)
+
+	// TUI control long-poll + log sink.
+	mux.HandleFunc("GET /tui/control/next", s.handleTUIControlNext)
+	mux.HandleFunc("POST /log", s.handleLog)
+
 	return mux
 }
 
