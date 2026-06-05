@@ -1,0 +1,6 @@
+bin/
+opencode-go
+*.log
+.env
+auth.json
+*.tmp
