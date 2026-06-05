@@ -76,6 +76,47 @@ func (s *Store) GetSession(id string) (Session, bool) {
 	return *sess, true
 }
 
+// UpdateTitle updates the session and bumps Time.Updated, returning a copy of
+// the updated session and whether it existed. A nil title leaves the existing
+// title unchanged (the PATCH field was omitted); a non-nil title is applied.
+func (s *Store) UpdateTitle(id string, title *string) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return Session{}, false
+	}
+	if title != nil {
+		sess.Title = *title
+	}
+	sess.Time.Updated = nowMS()
+	return *sess, true
+}
+
+// Delete removes a session and its messages. Returns whether it existed.
+func (s *Store) Delete(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[id]; !ok {
+		return false
+	}
+	delete(s.sessions, id)
+	delete(s.messages, id)
+	return true
+}
+
+// GetMessage returns a deep copy of a single message's {info, parts} and whether
+// it exists, matching Messages() deep-copy-on-read semantics (architecture §2.2).
+func (s *Store) GetMessage(sessionID, messageID string) (MessageWithParts, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return MessageWithParts{}, false
+	}
+	return copyMessage(mwp), true
+}
+
 // AppendUserMessage appends a user message built from the prompt text parts and
 // returns a copy of the stored MessageWithParts.
 func (s *Store) AppendUserMessage(sessionID, messageID string, texts []string) (MessageWithParts, bool) {

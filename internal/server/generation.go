@@ -6,6 +6,7 @@ import (
 
 	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/provider"
+	"github.com/opencode-go/opencode-go/internal/session"
 )
 
 // publishUserMessage publishes message.updated for the user message.
@@ -29,6 +30,15 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 //
 // (message.updated(user) is published by the handler before this runs.)
 func (s *Server) runGeneration(sessionID, modelID string, texts []string) {
+	s.runGenerationSync(sessionID, modelID, texts)
+}
+
+// runGenerationSync runs the assistant turn inline (same pipeline and event
+// sequence as runGeneration) and returns the final assistant MessageWithParts
+// once the turn has completed. ok is false if the session/message could not be
+// resolved. The async path wraps this in a goroutine; the synchronous
+// POST /session/{id}/message handler blocks on it directly.
+func (s *Server) runGenerationSync(sessionID, modelID string, texts []string) (session.MessageWithParts, bool) {
 	ctx := context.Background()
 
 	// session.status{type:"busy"}
@@ -39,7 +49,7 @@ func (s *Server) runGeneration(sessionID, modelID string, texts []string) {
 	if !ok {
 		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "session not found"}))
 		s.bus.Publish(event.NewSessionIdle(sessionID))
-		return
+		return session.MessageWithParts{}, false
 	}
 	messageID := asst.Info.ID
 	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
@@ -55,7 +65,7 @@ func (s *Server) runGeneration(sessionID, modelID string, texts []string) {
 		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": err.Error()}))
 		s.finishGeneration(sessionID, messageID)
 		s.bus.Publish(event.NewSessionIdle(sessionID))
-		return
+		return s.finalAssistantMessage(sessionID, messageID)
 	}
 
 	for chunk := range stream {
@@ -77,6 +87,14 @@ func (s *Server) runGeneration(sessionID, modelID string, texts []string) {
 
 	// Synthetic terminal session.idle -> GUARANTEED.
 	s.bus.Publish(event.NewSessionIdle(sessionID))
+
+	return s.finalAssistantMessage(sessionID, messageID)
+}
+
+// finalAssistantMessage returns a deep copy of the completed assistant
+// MessageWithParts for the synchronous response.
+func (s *Server) finalAssistantMessage(sessionID, messageID string) (session.MessageWithParts, bool) {
+	return s.store.GetMessage(sessionID, messageID)
 }
 
 // emitDelta appends the delta to the store and publishes BOTH the droppable

@@ -27,6 +27,7 @@ const (
 	TypeSessionError       = "session.error"
 	TypeSessionStatus      = "session.status"
 	TypeSessionUpdated     = "session.updated"
+	TypeSessionDeleted     = "session.deleted"
 	TypePermissionAsked    = "permission.asked"
 	TypePermissionUpdated  = "permission.updated"
 	TypePermissionReplied  = "permission.replied"
@@ -65,6 +66,17 @@ type SessionIdleProps struct {
 type SessionStatusProps struct {
 	SessionID string `json:"sessionID"`
 	Status    any    `json:"status"`
+}
+
+// SessionUpdatedProps is the properties shape for session.updated.
+type SessionUpdatedProps struct {
+	SessionID string `json:"sessionID"`
+	Info      any    `json:"info"`
+}
+
+// SessionDeletedProps is the properties shape for session.deleted.
+type SessionDeletedProps struct {
+	Info any `json:"info"`
 }
 
 // SessionErrorProps is the properties shape for session.error.
@@ -119,6 +131,18 @@ func NewSessionIdle(sessionID string) Event {
 // NewSessionStatus creates a session.status event (e.g. {type:"busy"}).
 func NewSessionStatus(sessionID string, status any) Event {
 	return Event{ID: newID("evt"), Type: TypeSessionStatus, Properties: SessionStatusProps{SessionID: sessionID, Status: status}}
+}
+
+// NewSessionUpdated creates a session.updated event carrying the Session info.
+func NewSessionUpdated(sessionID string, info any) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionUpdated,
+		Properties: SessionUpdatedProps{SessionID: sessionID, Info: info}}
+}
+
+// NewSessionDeleted creates a session.deleted event carrying the Session info.
+func NewSessionDeleted(info any) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionDeleted,
+		Properties: SessionDeletedProps{Info: info}}
 }
 
 // NewSessionError creates a session.error event.

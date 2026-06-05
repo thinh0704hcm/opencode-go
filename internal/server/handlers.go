@@ -96,6 +96,53 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handlePrompt serves POST /session/{id}/message. It runs the SAME generation
+// pipeline as prompt_async (emitting the identical SSE event sequence) but
+// BLOCKS until the assistant turn completes, then returns 200 with the final
+// assistant {info, parts}. 404 if the session is unknown.
+func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	var req promptAsyncRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	texts := make([]string, 0, len(req.Parts))
+	for _, p := range req.Parts {
+		if p.Type == "text" {
+			texts = append(texts, p.Text)
+		}
+	}
+
+	modelID := req.Model.ModelID
+	if modelID == "" {
+		modelID = s.model
+	}
+
+	// Append the user message and publish message.updated(user) synchronously
+	// so it is ordered before the assistant turn.
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, texts)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	s.publishUserMessage(id, userMsg.Info)
+
+	// Block until the assistant turn completes, reusing the shared pipeline.
+	asst, ok := s.runGenerationSync(id, modelID, texts)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, asst)
+}
+
 // handleGetMessages serves GET /session/{id}/message, returning a deep-copied
 // JSON array of {info, parts}.
 func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
