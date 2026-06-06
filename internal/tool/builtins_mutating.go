@@ -1,11 +1,14 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -78,6 +81,30 @@ func (editTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	return Result{Output: "edited " + in.Path}, nil
 }
 
+// limitedWriter writes to w until n bytes have been consumed, after which
+// further writes are discarded (reporting success so the producing process
+// keeps running and exits normally) and truncated is flagged.
+type limitedWriter struct {
+	w         io.Writer
+	n         int
+	truncated bool
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.n <= 0 {
+		l.truncated = true
+		return len(p), nil
+	}
+	if len(p) > l.n {
+		l.w.Write(p[:l.n])
+		l.n = 0
+		l.truncated = true
+		return len(p), nil
+	}
+	l.n -= len(p)
+	return l.w.Write(p)
+}
+
 // bashTool runs a command through bash inside the sandbox root, confining the
 // child to its own process group so the whole group can be reaped.
 type bashTool struct{}
@@ -108,7 +135,11 @@ func (bashTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 		return nil
 	}
 
-	combined, _ := cmd.CombinedOutput()
+	var buf bytes.Buffer
+	lw := &limitedWriter{w: &buf, n: MaxOutputBytes * 2}
+	cmd.Stdout = lw
+	cmd.Stderr = lw
+	runErr := cmd.Run()
 
 	// Defensive sweep: ensure the group is gone even on normal completion.
 	// ESRCH (no such process) after exit is expected and ignored.
@@ -116,9 +147,11 @@ func (bashTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
-	out, truncated := TruncateOutput(combined)
+	out, truncated := TruncateOutput(buf.Bytes())
 	if ctx2.Err() == context.DeadlineExceeded {
 		out += "\n[command timed out after " + DefaultCmdTimeout.String() + "]"
+	} else if exitErr, ok := runErr.(*exec.ExitError); ok {
+		out += "\n[exit status " + strconv.Itoa(exitErr.ExitCode()) + "]"
 	}
 	return Result{Output: out, Truncated: truncated}, nil
 }

@@ -119,6 +119,11 @@ func startReader(p *Pty) {
 	p.mu.Unlock()
 
 	go func() {
+		defer func() {
+			if p.cmd != nil {
+				_ = p.cmd.Wait()
+			}
+		}()
 		buf := make([]byte, 4096)
 		for {
 			n, err := ptmx.Read(buf)
@@ -150,6 +155,7 @@ func startReader(p *Pty) {
 func (p *Pty) closeSubs() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.closed = true
 	for id, ch := range p.subs {
 		close(ch)
 		delete(p.subs, id)
