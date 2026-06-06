@@ -1,5 +1,5 @@
 bin/
-opencode-go
+/opencode-go
 *.log
 .env
 auth.json
