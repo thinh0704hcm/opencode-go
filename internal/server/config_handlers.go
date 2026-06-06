@@ -75,33 +75,14 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maskConfigAPIKeys walks out["provider"][*]["options"]["apiKey"] and replaces
-// every non-empty apiKey with the masked sentinel in place. Empty/absent keys
-// are left untouched so the TUI can distinguish "configured" from "missing".
-func maskConfigAPIKeys(out map[string]any) {
-	providers, ok := out["provider"].(map[string]any)
-	if !ok {
-		return
-	}
-	for _, pv := range providers {
-		obj, ok := pv.(map[string]any)
-		if !ok {
-			continue
-		}
-		opts, ok := obj["options"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if v, ok := opts["apiKey"].(string); ok && v != "" {
-			opts["apiKey"] = maskedAPIKey
-		}
-	}
-}
-
 // secretValueRe flags string VALUES that are themselves secrets regardless of
 // the key holding them: an OpenAI-style "sk-" token (>=12 trailing chars) or an
 // inline "Bearer " credential.
 var secretValueRe = regexp.MustCompile(`(?i)sk-[A-Za-z0-9_-]{12,}`)
+
+// googleKeyRe flags Google API keys ("AIza" prefix + >=20 token chars). Kept
+// case-sensitive to avoid false positives on ordinary config strings.
+var googleKeyRe = regexp.MustCompile(`AIza[0-9A-Za-z_-]{20,}`)
 
 // secretKeyNames are map KEYS (compared case-insensitively) whose string VALUE
 // is always a secret and must be masked.
@@ -134,7 +115,7 @@ var neverMaskKeyNames = map[string]bool{
 
 // valueLooksSecret reports whether a string VALUE is itself a credential.
 func valueLooksSecret(s string) bool {
-	return strings.HasPrefix(s, "Bearer ") || secretValueRe.MatchString(s)
+	return strings.HasPrefix(s, "Bearer ") || secretValueRe.MatchString(s) || googleKeyRe.MatchString(s)
 }
 
 // maskSecretsDeep recursively walks maps and slices, replacing secret string

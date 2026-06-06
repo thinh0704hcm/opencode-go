@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -45,10 +46,32 @@ func (s *Sandbox) Root() string {
 	return s.root
 }
 
+// OpenFileNoFollow resolves rel within the sandbox and opens it with
+// syscall.O_NOFOLLOW set on the final component, so a symlink swapped in at the
+// terminal path between Resolve's check and this open is rejected rather than
+// followed. This closes the residual TOCTOU gap documented on Resolve for
+// callers that adopt it.
+func (s *Sandbox) OpenFileNoFollow(rel string, flag int, perm os.FileMode) (*os.File, error) {
+	abs, err := s.Resolve(rel)
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(abs, flag|syscall.O_NOFOLLOW, perm)
+}
+
 // Resolve maps a relative path to a safe absolute path inside the sandbox
 // root. It allows creating new files (paths that do not yet exist, as long as
 // their parent exists) but rejects absolute paths, traversal that escapes the
 // root, and symlink escapes.
+//
+// Residual TOCTOU note: Resolve validates symlinks at check time, but the
+// actual file operation (e.g. os.ReadFile/os.WriteFile in the calling tools)
+// runs later on the returned path. A symlink swapped between this check and the
+// subsequent use could escape the sandbox. This window is low risk on a
+// single-tenant loopback deployment, but callers that need to close it should
+// open the final path via OpenFileNoFollow, which sets syscall.O_NOFOLLOW on
+// the final component so an attacker-swapped terminal symlink is rejected at
+// open time rather than silently followed.
 func (s *Sandbox) Resolve(rel string) (string, error) {
 	// 1. Reject absolute inputs or ".." elements that escape the root.
 	if filepath.IsAbs(rel) {

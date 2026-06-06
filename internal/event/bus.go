@@ -111,13 +111,15 @@ func (b *Bus) Publish(ev Event) {
 	}
 }
 
-// deliverGuaranteed blocks with a bounded timeout; on timeout the subscriber is
-// wedged, so it is evicted (removed + channel closed) rather than allowed to
-// back-pressure the prompt worker indefinitely (architecture §2.3).
+// deliverGuaranteed does a non-blocking send; if the subscriber's buffered
+// channel is full the consumer is wedged, so it is evicted immediately rather
+// than allowed to back-pressure Publish (and thereby every other session's
+// guaranteed events) for busDeliveryTimeoutVar (architecture §2.3). Evicting a
+// wedged SSE consumer closes its ws, which reconnects and re-fetches state.
 func (b *Bus) deliverGuaranteed(s *Subscriber, ev Event) {
 	select {
 	case s.ch <- ev:
-	case <-time.After(busDeliveryTimeoutVar):
+	default:
 		b.evict(s)
 	}
 }
