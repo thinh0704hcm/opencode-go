@@ -205,7 +205,7 @@ func TestSessionGetSingleMessage(t *testing.T) {
 
 	// Drive the store directly for a deterministic message id (white-box).
 	sess := srv.store.CreateSession("", "", "")
-	msg, ok := srv.store.AppendUserMessage(sess.ID, "", []string{"hello"})
+	msg, ok := srv.store.AppendUserMessage(sess.ID, "", "", "", []string{"hello"})
 	if !ok {
 		t.Fatal("AppendUserMessage failed")
 	}

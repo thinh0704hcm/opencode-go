@@ -8,9 +8,15 @@ import (
 	"github.com/opencode-go/opencode-go/internal/session"
 )
 
-// publishUserMessage publishes message.updated for the user message.
-func (s *Server) publishUserMessage(sessionID string, info any) {
-	s.bus.Publish(event.NewMessageUpdated(sessionID, info, false))
+// publishUserMessage publishes message.updated for the user message and a
+// message.part.updated for each of its parts (the TUI renders message text
+// from message.part.updated events, not from message.updated info). The info
+// update is published before the parts so ordering holds for the consumer.
+func (s *Server) publishUserMessage(sessionID string, msg session.MessageWithParts) {
+	s.bus.Publish(event.NewMessageUpdated(sessionID, msg.Info, false))
+	for i := range msg.Parts {
+		s.bus.Publish(event.NewMessagePartUpdated(sessionID, msg.Parts[i], time.Now().UnixMilli()))
+	}
 }
 
 // publishPermissionReplied publishes the permission.replied event (B2 shape).
@@ -28,8 +34,8 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 //	-> session.idle{sessionID}                          [GUARANTEED, synthetic]
 //
 // (message.updated(user) is published by the handler before this runs.)
-func (s *Server) runGeneration(sessionID, modelID string, texts []string) {
-	s.runGenerationSync(sessionID, modelID, texts)
+func (s *Server) runGeneration(sessionID, userMsgID, providerID, modelID string, texts []string) {
+	s.runGenerationSync(sessionID, userMsgID, providerID, modelID, texts)
 }
 
 // runGenerationSync runs the assistant turn inline (same pipeline and event
@@ -37,28 +43,48 @@ func (s *Server) runGeneration(sessionID, modelID string, texts []string) {
 // once the turn has completed. ok is false if the session/message could not be
 // resolved. The async path wraps this in a goroutine; the synchronous
 // POST /session/{id}/message handler blocks on it directly.
-func (s *Server) runGenerationSync(sessionID, modelID string, texts []string) (session.MessageWithParts, bool) {
-	ctx := context.Background()
+func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID string, texts []string) (session.MessageWithParts, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerCancel(sessionID, cancel)
+	defer func() { s.clearCancel(sessionID); cancel() }()
 
 	// session.status{type:"busy"}
 	s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "busy"}))
 
 	// Assistant message (time.completed=null) + message.updated(assistant).
-	asst, ok := s.store.NewAssistantMessage(sessionID)
+	asst, ok := s.store.NewAssistantMessage(sessionID, userMsgID, providerID, modelID)
 	if !ok {
 		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "session not found"}))
+		s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}))
 		s.bus.Publish(event.NewSessionIdle(sessionID))
 		return session.MessageWithParts{}, false
 	}
 	messageID := asst.Info.ID
 	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
 
+	// NewAssistantMessage seeds a step-start part (Parts[0]); stream it before
+	// any text so consumers see step-start -> text -> step-finish ordering.
+	if len(asst.Parts) > 0 {
+		s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
+	}
+
 	s.runAgentLoop(ctx, sessionID, messageID, modelID, texts)
+
+	// Append + publish the terminal step-finish part before the final
+	// message.updated, matching real opencode's part ordering.
+	if sf, ok := s.store.AppendStepFinish(sessionID, messageID, "stop", 0, &session.Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: session.TokenCache{Read: 0, Write: 0}}); ok {
+		s.bus.Publish(event.NewMessagePartUpdated(sessionID, sf, time.Now().UnixMilli()))
+	}
+
+	// Close out open assistant text parts (set Time.End) so the completed
+	// message carries both start and end on its text parts, matching real.
+	s.store.FinishTextParts(sessionID, messageID)
 
 	// Final assistant message.updated (time.completed set) -> GUARANTEED.
 	s.finishGeneration(sessionID, messageID)
 
 	// Synthetic terminal session.idle -> GUARANTEED.
+	s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}))
 	s.bus.Publish(event.NewSessionIdle(sessionID))
 
 	return s.finalAssistantMessage(sessionID, messageID)

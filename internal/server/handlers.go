@@ -83,15 +83,15 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, texts)
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	s.publishUserMessage(id, userMsg.Info)
+	s.publishUserMessage(id, userMsg)
 
 	// Run the generation in the background; return 204 immediately.
-	go s.runGeneration(id, modelID, texts)
+	go s.runGeneration(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -127,15 +127,15 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, texts)
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	s.publishUserMessage(id, userMsg.Info)
+	s.publishUserMessage(id, userMsg)
 
 	// Block until the assistant turn completes, reusing the shared pipeline.
-	asst, ok := s.runGenerationSync(id, modelID, texts)
+	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

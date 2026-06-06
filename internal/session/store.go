@@ -1,8 +1,9 @@
 package session
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -14,31 +15,79 @@ type Store struct {
 	messages map[string][]*MessageWithParts // ses_* -> ordered messages
 }
 
-var idSeq atomic.Uint64
-
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-// NewID produces prefix + "_" + base62(monotonic).
+// ID format mirrors opencode's src/id/id.ts exactly so the TUI's timestamp
+// parser stays byte-compatible. The TUI reads the first 12 hex chars after the
+// prefix as a big-endian integer and divides by 0x1000 to recover the sort
+// timestamp, so the first 6 bytes encode (unixMilli<<12 + counter). Sessions
+// are descending (bitwise-NOT), messages/parts/events ascending.
+const idTotalLength = 26
+
+var (
+	idMu      sync.Mutex
+	idLastTS  int64
+	idCounter int64
+)
+
+// NewID keeps the original signature so all call sites are unchanged. Only
+// the "ses" prefix sorts descending; everything else sorts ascending.
 func NewID(prefix string) string {
-	n := idSeq.Add(1)
-	return prefix + "_" + base62(n)
+	return createID(prefix, prefix == "ses")
 }
 
-func base62(n uint64) string {
-	if n == 0 {
-		return "0"
+func createID(prefix string, descending bool) string {
+	idMu.Lock()
+	ts := time.Now().UnixMilli()
+	if ts != idLastTS {
+		idLastTS = ts
+		idCounter = 0
 	}
-	var buf [16]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = base62Alphabet[n%62]
-		n /= 62
+	idCounter++
+	c := idCounter
+	idMu.Unlock()
+
+	v := uint64(ts)*0x1000 + uint64(c) // timestamp<<12 + counter
+	if descending {
+		v = ^v // bitwise NOT; only the low 48 bits are emitted below
 	}
-	return string(buf[i:])
+	b := make([]byte, 6)
+	for i := 0; i < 6; i++ {
+		b[i] = byte((v >> uint(40-8*i)) & 0xff)
+	}
+	hexpart := hex.EncodeToString(b) // 12 hex chars
+	return prefix + "_" + hexpart + randomBase62(idTotalLength-12)
+}
+
+func randomBase62(n int) string {
+	bs := make([]byte, n)
+	_, _ = rand.Read(bs)
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = base62Alphabet[int(bs[i])%62]
+	}
+	return string(out)
 }
 
 func nowMS() int64 { return time.Now().UnixMilli() }
+
+var (
+	monoMu sync.Mutex
+	lastMS int64
+)
+
+// nextMS returns a strictly-increasing epoch-ms timestamp, so no two
+// messages created in the same millisecond collide (the TUI orders by it).
+func nextMS() int64 {
+	monoMu.Lock()
+	defer monoMu.Unlock()
+	t := nowMS()
+	if t <= lastMS {
+		t = lastMS + 1
+	}
+	lastMS = t
+	return t
+}
 
 // NewStore creates an empty store.
 func NewStore() *Store {
@@ -119,19 +168,23 @@ func (s *Store) GetMessage(sessionID, messageID string) (MessageWithParts, bool)
 
 // AppendUserMessage appends a user message built from the prompt text parts and
 // returns a copy of the stored MessageWithParts.
-func (s *Store) AppendUserMessage(sessionID, messageID string, texts []string) (MessageWithParts, bool) {
-	now := nowMS()
+func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID string, texts []string) (MessageWithParts, bool) {
+	now := nextMS()
 	if messageID == "" {
 		messageID = NewID("msg")
 	}
-	completed := now
 	mwp := &MessageWithParts{
 		Info: Message{
 			ID:        messageID,
 			Role:      "user",
 			SessionID: sessionID,
-			Time:      Time{Created: now, Completed: &completed},
+			Time:      Time{Created: now},
+			Agent:     "build",
+			Summary:   &MsgSummary{Diffs: []any{}},
 		},
+	}
+	if providerID != "" && modelID != "" {
+		mwp.Info.Model = &MsgModel{ProviderID: providerID, ModelID: modelID}
 	}
 	for _, t := range texts {
 		mwp.Parts = append(mwp.Parts, Part{
@@ -154,16 +207,33 @@ func (s *Store) AppendUserMessage(sessionID, messageID string, texts []string) (
 
 // NewAssistantMessage creates an assistant message (time.completed=null) and
 // appends it. Returns a copy.
-func (s *Store) NewAssistantMessage(sessionID string) (MessageWithParts, bool) {
-	now := nowMS()
+func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID string) (MessageWithParts, bool) {
+	now := nextMS()
 	mwp := &MessageWithParts{
 		Info: Message{
-			ID:        NewID("msg"),
-			Role:      "assistant",
-			SessionID: sessionID,
-			Time:      Time{Created: now, Completed: nil},
+			ID:         NewID("msg"),
+			Role:       "assistant",
+			SessionID:  sessionID,
+			Time:       Time{Created: now, Completed: nil},
+			Agent:      "build",
+			ParentID:   parentID,
+			ProviderID: providerID,
+			ModelID:    modelID,
+			Mode:       "build",
+			Finish:     "stop",
+			// Non-nil so the TUI can read tokens.output without dereferencing nil.
+			Tokens: &Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: TokenCache{Read: 0, Write: 0}},
+			Path:   &MsgPath{Cwd: ".", Root: "."},
 		},
 	}
+	// Real opencode assistant messages begin with a step-start part; the text
+	// part(s) and a trailing step-finish part follow during the turn.
+	mwp.Parts = append(mwp.Parts, Part{
+		ID:        NewID("prt"),
+		MessageID: mwp.Info.ID,
+		SessionID: sessionID,
+		Type:      "step-start",
+	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.sessions[sessionID]; !ok {
@@ -201,11 +271,13 @@ func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part
 			MessageID: messageID,
 			SessionID: sessionID,
 			Type:      partType,
+			// Assistant text parts carry a start time (user text parts do not).
+			Time: &PartTime{Start: nextMS()},
 		})
 		p = &mwp.Parts[len(mwp.Parts)-1]
 	}
 	p.Text += delta
-	return *p, true
+	return copyPart(*p), true
 }
 
 // AppendToolPart records a tool-activity part on the assistant message so the
@@ -231,7 +303,29 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status, o
 	return copyPart(*p), true
 }
 
-// CompleteAssistantMessage sets time.completed on the assistant message and
+// AppendStepFinish appends a step-finish part (carrying reason/cost/tokens) to
+// the assistant message, mirroring real opencode's terminal part. Returns a
+// copy of the new part and whether the message was found.
+func (s *Store) AppendStepFinish(sessionID, messageID, reason string, cost float64, tokens *Tokens) (Part, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return Part{}, false
+	}
+	mwp.Parts = append(mwp.Parts, Part{
+		ID:        NewID("prt"),
+		MessageID: messageID,
+		SessionID: sessionID,
+		Type:      "step-finish",
+		Reason:    reason,
+		Cost:      cost,
+		Tokens:    tokens,
+	})
+	p := &mwp.Parts[len(mwp.Parts)-1]
+	return copyPart(*p), true
+}
+
 // returns a copy of its info.
 func (s *Store) CompleteAssistantMessage(sessionID, messageID string) (Message, bool) {
 	s.mu.Lock()
@@ -240,9 +334,29 @@ func (s *Store) CompleteAssistantMessage(sessionID, messageID string) (Message, 
 	if mwp == nil {
 		return Message{}, false
 	}
-	now := nowMS()
+	now := nextMS()
 	mwp.Info.Time.Completed = &now
 	return mwp.Info, true
+}
+
+// FinishTextParts closes out any open assistant text parts by setting Time.End
+// for each "text" part that has a start time but no end yet. Real opencode's
+// completed assistant text parts carry both start and end timestamps; this
+// matches that shape when the turn finishes. No-op if the message is missing.
+func (s *Store) FinishTextParts(sessionID, messageID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return
+	}
+	for i := range mwp.Parts {
+		p := &mwp.Parts[i]
+		if p.Type == "text" && p.Time != nil && p.Time.End == nil {
+			end := nextMS()
+			p.Time.End = &end
+		}
+	}
 }
 
 // MessageInfo returns a copy of a message's info block.
@@ -290,6 +404,14 @@ func copyMessage(m *MessageWithParts) MessageWithParts {
 		c := *m.Info.Time.Completed
 		out.Info.Time.Completed = &c
 	}
+	if m.Info.Tokens != nil {
+		t := *m.Info.Tokens
+		out.Info.Tokens = &t
+	}
+	if m.Info.Path != nil {
+		p := *m.Info.Path
+		out.Info.Path = &p
+	}
 	out.Parts = make([]Part, len(m.Parts))
 	for i := range m.Parts {
 		out.Parts[i] = copyPart(m.Parts[i])
@@ -297,12 +419,24 @@ func copyMessage(m *MessageWithParts) MessageWithParts {
 	return out
 }
 
-// copyPart returns a value copy of a Part with a cloned State pointer so
-// concurrent readers never share the *PartState.
+// copyPart returns a value copy of a Part with cloned pointer fields (State,
+// Time, Tokens) so concurrent readers never share mutable pointers.
 func copyPart(p Part) Part {
 	if p.State != nil {
 		st := *p.State
 		p.State = &st
+	}
+	if p.Time != nil {
+		t := *p.Time
+		if p.Time.End != nil {
+			e := *p.Time.End
+			t.End = &e
+		}
+		p.Time = &t
+	}
+	if p.Tokens != nil {
+		tk := *p.Tokens
+		p.Tokens = &tk
 	}
 	return p
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
@@ -26,6 +27,9 @@ type Server struct {
 	logger   *slog.Logger
 	tools    *tool.Registry
 	workdir  string
+
+	cancelMu sync.Mutex
+	cancels  map[string]context.CancelFunc
 
 	http *http.Server
 }
@@ -62,12 +66,40 @@ func New(opts Options) *Server {
 		logger:   logger,
 		tools:    tools,
 		workdir:  workdir,
+		cancels:  map[string]context.CancelFunc{},
 	}
 }
 
 // Handler returns the HTTP handler (router) for the server.
 func (s *Server) Handler() http.Handler {
 	return s.routes()
+}
+
+// registerCancel records the cancel func for an in-flight session turn.
+func (s *Server) registerCancel(sessionID string, cancel context.CancelFunc) {
+	s.cancelMu.Lock()
+	s.cancels[sessionID] = cancel
+	s.cancelMu.Unlock()
+}
+
+// clearCancel removes the cancel func for a session once its turn ends.
+func (s *Server) clearCancel(sessionID string) {
+	s.cancelMu.Lock()
+	delete(s.cancels, sessionID)
+	s.cancelMu.Unlock()
+}
+
+// cancelSession cancels the in-flight turn for a session, returning true if one
+// was registered.
+func (s *Server) cancelSession(sessionID string) bool {
+	s.cancelMu.Lock()
+	c, ok := s.cancels[sessionID]
+	s.cancelMu.Unlock()
+	if ok && c != nil {
+		c()
+		return true
+	}
+	return false
 }
 
 // ListenAndServe binds to addr (expected 127.0.0.1:port) and serves until

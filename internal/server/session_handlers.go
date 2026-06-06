@@ -76,15 +76,18 @@ func (s *Server) handleSessionChildren(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []interface{}{})
 }
 
-// handleSessionAbort serves POST /session/{id}/abort. M1's generation worker has
-// no per-session cancel registry (it runs on context.Background()), so this is a
-// no-op that publishes a final session.idle{sessionID} and returns true.
+// handleSessionAbort serves POST /session/{id}/abort. It cancels the in-flight
+// generation turn (if any) via the per-session cancel registry and publishes
+// session.status{idle} + session.idle{sessionID} so the TUI clears its busy
+// state, then returns true.
 func (s *Server) handleSessionAbort(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := s.store.GetSession(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	s.cancelSession(id)
+	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
 	s.bus.Publish(event.NewSessionIdle(id))
 	writeJSON(w, http.StatusOK, true)
 }
