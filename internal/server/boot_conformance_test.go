@@ -161,11 +161,10 @@ func TestEmptyStubShapes(t *testing.T) {
 		want string
 	}{
 		{"/command", "[]"},
-		{"/mcp", "{}"},
+		// /mcp now has a real config-backed shape (M5b); covered by behavior tests.
 		{"/formatter", "[]"},
 		{"/lsp", "[]"},
 		{"/session/status", "{}"},
-		{"/vcs", `{"branch":null,"default_branch":null}`},
 		{"/experimental/workspace", "[]"},
 	}
 	for _, c := range cases {

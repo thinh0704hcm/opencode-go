@@ -131,11 +131,6 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []any{})
 }
 
-// handleMCP serves GET /mcp -> {}.
-func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{})
-}
-
 // handleFormatter serves GET /formatter -> [].
 func (s *Server) handleFormatter(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []any{})
@@ -149,11 +144,6 @@ func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
 // handleSessionStatus serves GET /session/status -> {}.
 func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{})
-}
-
-// handleVCS serves GET /vcs -> {branch:null,default_branch:null}.
-func (s *Server) handleVCS(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, vcsResponse{Branch: nil, DefaultBranch: nil})
 }
 
 // handleExperimentalResource serves GET /experimental/resource -> {}.
