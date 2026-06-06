@@ -106,6 +106,8 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 					"id":        preq.ID,
 					"type":      call.Name,
 					"pattern":   pattern,
+					"always":    []any{},        // TUI reads request.always.length — MUST be an array
+					"patterns":  []any{pattern}, // real PermissionRequest uses a patterns array
 					"sessionID": sessionID,
 					"messageID": messageID,
 					"callID":    call.ID,
