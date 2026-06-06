@@ -31,6 +31,7 @@ func (s *Server) routes() http.Handler {
 	// Prompt (async) + messages.
 	mux.HandleFunc("POST /session/{id}/prompt_async", s.handlePromptAsync)
 	mux.HandleFunc("POST /session/{id}/message", s.handlePrompt)
+	mux.HandleFunc("POST /session/{id}/shell", s.handleSessionShell)
 	mux.HandleFunc("GET /session/{id}/message", s.handleGetMessages)
 	mux.HandleFunc("GET /session/{id}/message/{messageID}", s.handleGetMessage)
 
@@ -85,7 +86,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /tui/control/next", s.handleTUIControlNext)
 	mux.HandleFunc("POST /log", s.handleLog)
 
-	return mux
+	return s.loggingMiddleware(mux)
 }
 
 // directoryOf extracts the optional ?directory=<cwd> query param.
