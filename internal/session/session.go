@@ -58,7 +58,7 @@ type Message struct {
 	ProviderID string      `json:"providerID,omitempty"`
 	Mode       string      `json:"mode,omitempty"`
 	Finish     string      `json:"finish,omitempty"`
-	Cost       float64     `json:"cost,omitempty"`
+	Cost       float64     `json:"cost"`
 	Tokens     *Tokens     `json:"tokens,omitempty"`
 	Path       *MsgPath    `json:"path,omitempty"`
 	Model      *MsgModel   `json:"model,omitempty"`   // user message model
