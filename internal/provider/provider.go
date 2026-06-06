@@ -12,6 +12,23 @@ type ChatMessage struct {
 	// Optional fields for sending tool results back to the model.
 	ToolCallID string `json:"tool_call_id,omitempty"` // when Role=="tool"
 	Name       string `json:"name,omitempty"`
+	// ToolCalls is set on an assistant message that calls one or more tools.
+	// OpenAI requires this assistant message to precede the matching tool
+	// result messages (ToolCallID).
+	ToolCalls []ChatToolCall `json:"tool_calls,omitempty"`
+}
+
+// ChatToolCall is one tool call carried on an assistant ChatMessage.
+type ChatToolCall struct {
+	ID       string               `json:"id"`
+	Type     string               `json:"type"` // "function"
+	Function ChatToolCallFunction `json:"function"`
+}
+
+// ChatToolCallFunction is the function payload of a ChatToolCall.
+type ChatToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string of args
 }
 
 // ToolSchema describes a tool the model may call.

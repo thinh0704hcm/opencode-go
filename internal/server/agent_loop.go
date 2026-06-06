@@ -67,6 +67,21 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 			return
 		}
 
+		// OpenAI protocol: the assistant message carrying the tool_calls MUST
+		// precede the matching tool result messages. Append it before executing
+		// the calls so the next turn sees a valid sequence.
+		if len(calls) > 0 {
+			tcs := make([]provider.ChatToolCall, 0, len(calls))
+			for _, c := range calls {
+				tcs = append(tcs, provider.ChatToolCall{
+					ID:       c.ID,
+					Type:     "function",
+					Function: provider.ChatToolCallFunction{Name: c.Name, Arguments: string(c.Input)},
+				})
+			}
+			messages = append(messages, provider.ChatMessage{Role: "assistant", ToolCalls: tcs})
+		}
+
 		for _, call := range calls {
 			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", "")
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
