@@ -96,7 +96,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", toolInput, "")
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
 
-			if needsPermission(s.tools, call.Name) {
+			if needsPermission(s.tools, call.Name) && !s.perms.IsAllowed(sessionID, call.Name) {
 				preq := s.perms.Ask("per_"+call.ID, sessionID, call.Name)
 				s.bus.Publish(event.NewPermissionAsked(preq))
 				// Also emit permission.updated with a Permission-shaped object so
@@ -128,6 +128,9 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 				s.bus.Publish(event.NewPermissionUpdated(permObj))
 				reply := s.perms.Wait(ctx, preq, permTimeout)
 				s.bus.Publish(event.NewPermissionReplied(sessionID, preq.ID, reply))
+				if reply == "always" {
+					s.perms.Allow(sessionID, call.Name)
+				}
 				if reply == "reject" {
 					out := "permission denied"
 					p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)

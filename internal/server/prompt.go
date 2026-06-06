@@ -17,5 +17,9 @@ func buildSystemPrompt(workdir string) string {
 		"<env>\nWorking directory: %s\nPlatform: %s\nToday's date: %s\n</env>",
 		workdir, runtime.GOOS, time.Now().Format("2006-01-02"),
 	)
-	return defaultSystemPrompt + "\n\n" + env
+	prompt := defaultSystemPrompt + "\n\n" + env
+	if skills := loadSkillIndex(workdir); skills != "" {
+		prompt += "\n\n" + skills
+	}
+	return prompt
 }

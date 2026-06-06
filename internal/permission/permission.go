@@ -26,11 +26,27 @@ type Request struct {
 type Store struct {
 	mu       sync.Mutex
 	requests map[string]*Request // requestID -> request
+	allowed  map[string]bool     // sessionID\x00toolName -> always-allowed
 }
 
 // NewStore creates an empty permission store.
 func NewStore() *Store {
-	return &Store{requests: make(map[string]*Request)}
+	return &Store{requests: make(map[string]*Request), allowed: make(map[string]bool)}
+}
+
+// Allow records a per-session, per-tool "always" grant so subsequent calls of
+// that tool in the same session skip the permission gate.
+func (s *Store) Allow(sessionID, tool string) {
+	s.mu.Lock()
+	s.allowed[sessionID+"\x00"+tool] = true
+	s.mu.Unlock()
+}
+
+// IsAllowed reports whether the tool was previously always-allowed for the session.
+func (s *Store) IsAllowed(sessionID, tool string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allowed[sessionID+"\x00"+tool]
 }
 
 // Register stores a request and creates its reply channel.
