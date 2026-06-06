@@ -70,9 +70,20 @@ func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID str
 
 	s.runAgentLoop(ctx, sessionID, messageID, modelID, texts)
 
+	// If the turn was aborted/cancelled (ctx error), the abort handler
+	// (handleSessionAbort) owns the terminal session.status{idle} +
+	// session.idle publish. Record the step-finish reason as "aborted"
+	// (not a clean "stop") and finalize the message so it is not left
+	// dangling, but do NOT emit a second session.idle here.
+	aborted := ctx.Err() != nil
+	reason := "stop"
+	if aborted {
+		reason = "aborted"
+	}
+
 	// Append + publish the terminal step-finish part before the final
 	// message.updated, matching real opencode's part ordering.
-	if sf, ok := s.store.AppendStepFinish(sessionID, messageID, "stop", 0, &session.Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: session.TokenCache{Read: 0, Write: 0}}); ok {
+	if sf, ok := s.store.AppendStepFinish(sessionID, messageID, reason, 0, &session.Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: session.TokenCache{Read: 0, Write: 0}}); ok {
 		s.bus.Publish(event.NewMessagePartUpdated(sessionID, sf, time.Now().UnixMilli()))
 	}
 
@@ -82,6 +93,12 @@ func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID str
 
 	// Final assistant message.updated (time.completed set) -> GUARANTEED.
 	s.finishGeneration(sessionID, messageID)
+
+	if aborted {
+		// handleSessionAbort already published session.status{idle} +
+		// session.idle; emitting again would double the terminal event.
+		return s.finalAssistantMessage(sessionID, messageID)
+	}
 
 	// Synthetic terminal session.idle -> GUARANTEED.
 	s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}))

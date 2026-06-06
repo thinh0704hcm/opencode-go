@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
@@ -42,14 +43,14 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 
 		stream, err := s.provider.StreamChat(ctx, req)
 		if err != nil {
-			s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": err.Error()}))
+			s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(err.Error())}))
 			return
 		}
 
 		var calls []provider.ToolCall
 		for chunk := range stream {
 			if chunk.Err != nil {
-				s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": chunk.Err.Error()}))
+				s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(chunk.Err.Error())}))
 				continue
 			}
 			if chunk.TextDelta != "" {
@@ -150,4 +151,24 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 
 	// Exhausted the iteration budget without a final text turn.
 	s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "max tool iterations reached"}))
+}
+
+// scrubError redacts secrets that some gateways echo back inside 4xx error
+// bodies before the message is broadcast to every SSE subscriber. It strips
+// bearer tokens and sk-/AIza style API keys and caps the length to avoid
+// dumping huge response bodies.
+var (
+	scrubBearerRe = regexp.MustCompile(`(?i)bearer\s+\S+`)
+	scrubSkRe     = regexp.MustCompile(`sk-[A-Za-z0-9_\-]{8,}`)
+	scrubAizaRe   = regexp.MustCompile(`AIza[0-9A-Za-z_\-]{20,}`)
+)
+
+func scrubError(msg string) string {
+	msg = scrubBearerRe.ReplaceAllString(msg, "Bearer ***")
+	msg = scrubSkRe.ReplaceAllString(msg, "sk-***")
+	msg = scrubAizaRe.ReplaceAllString(msg, "AIza***")
+	if len(msg) > 500 {
+		msg = msg[:500]
+	}
+	return msg
 }

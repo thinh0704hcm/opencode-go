@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -155,7 +156,7 @@ func (grepTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 			if re.MatchString(line) {
 				b.WriteString(rel)
 				b.WriteByte(':')
-				b.WriteString(itoa(lineno))
+				b.WriteString(strconv.Itoa(lineno))
 				b.WriteByte(':')
 				b.WriteString(line)
 				b.WriteByte('\n')

@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/opencode-go/opencode-go/internal/session"
@@ -167,7 +169,7 @@ func decodeBody(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
 		// EOF (empty body) is acceptable for endpoints that accept {}.
-		if err.Error() == "EOF" {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return err
