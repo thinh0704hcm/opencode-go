@@ -54,6 +54,7 @@ type promptAsyncRequest struct {
 	Model     promptModel  `json:"model"`
 	Agent     string       `json:"agent"`
 	Parts     []promptPart `json:"parts"`
+	System    string       `json:"system,omitempty"`
 }
 
 // handlePromptAsync serves POST /session/{id}/prompt_async. Returns 204
@@ -93,7 +94,7 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	s.publishUserMessage(id, userMsg)
 
 	// Run the generation in the background; return 204 immediately.
-	go s.runGeneration(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts)
+	go s.runGeneration(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -137,7 +138,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	s.publishUserMessage(id, userMsg)
 
 	// Block until the assistant turn completes, reusing the shared pipeline.
-	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts)
+	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

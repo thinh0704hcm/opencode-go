@@ -24,7 +24,7 @@ const permTimeout = 60 * time.Second
 // the assistant message + busy status beforehand and for finishGeneration +
 // session.idle afterward; this method ONLY performs the provider+tool iteration,
 // emitting text/reasoning deltas and tool parts.
-func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string) {
+func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string, callerSystem string) {
 	messages := []provider.ChatMessage{{Role: "user", Content: joinTexts(texts)}}
 
 	sb, err := tool.New(s.workdir)
@@ -37,7 +37,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 		req := provider.ChatRequest{
 			Model:    modelID,
 			Messages: messages,
-			System:   buildSystemPrompt(s.workdir),
+			System:   combineSystem(buildSystemPrompt(s.workdir), callerSystem),
 			Tools:    toolSchemas(s.tools),
 		}
 
@@ -151,6 +151,16 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 
 	// Exhausted the iteration budget without a final text turn.
 	s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "max tool iterations reached"}))
+}
+
+// combineSystem appends a caller-supplied system string after the built-in
+// base prompt (matching how opencode appends env/instructions after the base
+// prompt). Returns base unchanged when extra is empty.
+func combineSystem(base, extra string) string {
+	if extra == "" {
+		return base
+	}
+	return base + "\n\n" + extra
 }
 
 // scrubError redacts secrets that some gateways echo back inside 4xx error

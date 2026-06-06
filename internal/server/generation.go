@@ -34,8 +34,8 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 //	-> session.idle{sessionID}                          [GUARANTEED, synthetic]
 //
 // (message.updated(user) is published by the handler before this runs.)
-func (s *Server) runGeneration(sessionID, userMsgID, providerID, modelID string, texts []string) {
-	s.runGenerationSync(sessionID, userMsgID, providerID, modelID, texts)
+func (s *Server) runGeneration(sessionID, userMsgID, providerID, modelID string, texts []string, callerSystem string) {
+	s.runGenerationSync(sessionID, userMsgID, providerID, modelID, texts, callerSystem)
 }
 
 // runGenerationSync runs the assistant turn inline (same pipeline and event
@@ -43,7 +43,7 @@ func (s *Server) runGeneration(sessionID, userMsgID, providerID, modelID string,
 // once the turn has completed. ok is false if the session/message could not be
 // resolved. The async path wraps this in a goroutine; the synchronous
 // POST /session/{id}/message handler blocks on it directly.
-func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID string, texts []string) (session.MessageWithParts, bool) {
+func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID string, texts []string, callerSystem string) (session.MessageWithParts, bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(sessionID, cancel)
 	defer func() { s.clearCancel(sessionID); cancel() }()
@@ -68,7 +68,7 @@ func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID str
 		s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
 	}
 
-	s.runAgentLoop(ctx, sessionID, messageID, modelID, texts)
+	s.runAgentLoop(ctx, sessionID, messageID, modelID, texts, callerSystem)
 
 	// If the turn was aborted/cancelled (ctx error), the abort handler
 	// (handleSessionAbort) owns the terminal session.status{idle} +
