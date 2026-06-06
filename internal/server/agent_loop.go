@@ -36,6 +36,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 		req := provider.ChatRequest{
 			Model:    modelID,
 			Messages: messages,
+			System:   buildSystemPrompt(s.workdir),
 			Tools:    toolSchemas(s.tools),
 		}
 

@@ -8,16 +8,12 @@ import (
 )
 
 // toolSchemas maps every registered tool to a provider.ToolSchema the model can
-// see. Parameters default to an empty JSON object schema.
+// see, attaching real descriptions and JSON-schema parameters for known tools.
 func toolSchemas(reg *tool.Registry) []provider.ToolSchema {
 	tools := reg.List()
 	schemas := make([]provider.ToolSchema, 0, len(tools))
 	for _, t := range tools {
-		schemas = append(schemas, provider.ToolSchema{
-			Name:        t.Name(),
-			Description: "",
-			Parameters:  map[string]any{"type": "object"},
-		})
+		schemas = append(schemas, schemaForTool(t.Name()))
 	}
 	return schemas
 }
