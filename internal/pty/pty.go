@@ -13,6 +13,8 @@ import (
 	"github.com/creack/pty"
 )
 
+const maxBuffer = 2 * 1024 * 1024
+
 // Pty is one pseudo-terminal session.
 type Pty struct {
 	ID      string
@@ -24,6 +26,14 @@ type Pty struct {
 	mu      sync.Mutex
 	closed  bool
 	tickets map[string]int64 // one-time connect tickets -> expiry epoch ms
+
+	// Buffered fan-out: a single background reader owns all ptmx reads,
+	// appends to a ring buffer, and copies each chunk to every subscriber.
+	buffer        []byte
+	cursor        int // total bytes ever written to subscribers
+	subs          map[int]chan []byte
+	nextSub       int
+	readerStarted bool
 }
 
 // Info is the JSON-safe view returned by HTTP handlers.
@@ -83,12 +93,67 @@ func (r *Registry) Create(id, title, command, cwd string) (*Pty, error) {
 		cmd:     cmd,
 		ptmx:    ptmx,
 		tickets: make(map[string]int64),
+		subs:    make(map[int]chan []byte),
 	}
+
+	startReader(p)
 
 	r.mu.Lock()
 	r.ptys[id] = p
 	r.mu.Unlock()
 	return p, nil
+}
+
+// startReader launches the single background goroutine that owns all reads
+// of ptmx. Each chunk is appended to the ring buffer and fanned out to every
+// subscriber (non-blocking; a full subscriber drops only its own chunk). On
+// read error/EOF it closes all subscriber channels so handlers exit.
+func startReader(p *Pty) {
+	p.mu.Lock()
+	if p.readerStarted {
+		p.mu.Unlock()
+		return
+	}
+	p.readerStarted = true
+	ptmx := p.ptmx
+	p.mu.Unlock()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				p.mu.Lock()
+				p.buffer = append(p.buffer, chunk...)
+				if len(p.buffer) > maxBuffer {
+					p.buffer = p.buffer[len(p.buffer)-maxBuffer:]
+				}
+				p.cursor += n
+				for _, ch := range p.subs {
+					select {
+					case ch <- chunk:
+					default:
+					}
+				}
+				p.mu.Unlock()
+			}
+			if err != nil {
+				p.closeSubs()
+				return
+			}
+		}
+	}()
+}
+
+// closeSubs closes and removes all subscriber channels (idempotent per sub).
+func (p *Pty) closeSubs() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id, ch := range p.subs {
+		close(ch)
+		delete(p.subs, id)
+	}
 }
 
 func (r *Registry) Get(id string) (*Pty, bool) {
@@ -135,6 +200,44 @@ func (p *Pty) Resize(rows, cols uint16) error {
 // Ptmx exposes the master fd for the websocket pump (read/write).
 func (p *Pty) Ptmx() *os.File {
 	return p.ptmx
+}
+
+// Subscribe returns a snapshot of the current buffered bytes, a channel of
+// future chunks, the current cursor, and an unsubscribe func. The unsub func
+// is safe to call multiple times (double-close guarded).
+func (p *Pty) Subscribe() (backlog []byte, ch <-chan []byte, cursor int, unsub func()) {
+	p.mu.Lock()
+	snapshot := append([]byte(nil), p.buffer...)
+	cur := p.cursor
+	c := make(chan []byte, 256)
+	id := p.nextSub
+	p.nextSub++
+	if p.closed {
+		// Reader already gone: deliver backlog, then signal EOF.
+		close(c)
+		p.mu.Unlock()
+		return snapshot, c, cur, func() {}
+	}
+	p.subs[id] = c
+	p.mu.Unlock()
+
+	var once sync.Once
+	unsub = func() {
+		once.Do(func() {
+			p.mu.Lock()
+			if sub, ok := p.subs[id]; ok {
+				delete(p.subs, id)
+				close(sub)
+			}
+			p.mu.Unlock()
+		})
+	}
+	return snapshot, c, cur, unsub
+}
+
+// WriteInput writes raw input bytes to the pty.
+func (p *Pty) WriteInput(b []byte) (int, error) {
+	return p.ptmx.Write(b)
 }
 
 // IssueTicket mints a one-time, ~30s-TTL ticket for websocket connect auth.
