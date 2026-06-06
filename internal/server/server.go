@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -108,6 +111,13 @@ func (s *Server) cancelSession(sessionID string) bool {
 // ListenAndServe binds to addr (expected 127.0.0.1:port) and serves until
 // shutdown. Bind address is enforced by the caller (architecture §11).
 func (s *Server) ListenAndServe(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) && os.Getenv("OPENCODE_GO_ALLOW_NONLOOPBACK") != "1" {
+			return fmt.Errorf("refusing non-loopback bind %q (set OPENCODE_GO_ALLOW_NONLOOPBACK=1 to override)", addr)
+		}
+	}
 	s.http = &http.Server{
 		Addr:    addr,
 		Handler: s.routes(),

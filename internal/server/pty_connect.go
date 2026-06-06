@@ -24,11 +24,10 @@ func (s *Server) handlePtyConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ticket := r.URL.Query().Get("ticket")
-	if ticket != "" && !p.RedeemTicket(ticket) {
+	if !p.RedeemTicket(ticket) {
 		writeError(w, http.StatusForbidden, "invalid or expired ticket")
 		return
 	}
-	// empty ticket: allowed (loopback no-auth posture, matches opencode)
 	if p.Ptmx() == nil {
 		writeError(w, http.StatusGone, "pty closed")
 		return
