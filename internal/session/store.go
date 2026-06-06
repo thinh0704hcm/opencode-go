@@ -283,12 +283,17 @@ func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part
 // AppendToolPart records a tool-activity part on the assistant message so the
 // agent loop can surface tool calls. Returns a copy of the new part and whether
 // the message was found.
-func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status, output string) (Part, bool) {
+func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status string, input map[string]any, output string) (Part, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mwp := s.findMessageLocked(sessionID, messageID)
 	if mwp == nil {
 		return Part{}, false
+	}
+	now := nextMS()
+	end := int64(0)
+	if status == "completed" || status == "error" {
+		end = now
 	}
 	mwp.Parts = append(mwp.Parts, Part{
 		ID:        NewID("prt"),
@@ -297,7 +302,14 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status, o
 		Type:      "tool",
 		Tool:      toolName,
 		CallID:    callID,
-		State:     &PartState{Status: status, Output: output},
+		State: &PartState{
+			Status:   status,
+			Input:    input,
+			Output:   output,
+			Title:    "",
+			Metadata: map[string]any{"output": output, "description": ""},
+			Time:     &PartStateTime{Start: now, End: end},
+		},
 	})
 	p := &mwp.Parts[len(mwp.Parts)-1]
 	return copyPart(*p), true
@@ -424,6 +436,10 @@ func copyMessage(m *MessageWithParts) MessageWithParts {
 func copyPart(p Part) Part {
 	if p.State != nil {
 		st := *p.State
+		if p.State.Time != nil {
+			t := *p.State.Time
+			st.Time = &t
+		}
 		p.State = &st
 	}
 	if p.Time != nil {

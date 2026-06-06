@@ -84,7 +84,8 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Running tool part.
-	if p, ok := s.store.AppendToolPart(id, messageID, "bash", "shell_1", "running", ""); ok {
+	toolInput := map[string]any{"command": req.Command}
+	if p, ok := s.store.AppendToolPart(id, messageID, "bash", "shell_1", "running", toolInput, ""); ok {
 		s.bus.Publish(event.NewMessagePartUpdated(id, p, time.Now().UnixMilli()))
 	}
 
@@ -100,7 +101,7 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
 	if isErr {
 		status = "error"
 	}
-	if p2, ok := s.store.AppendToolPart(id, messageID, "bash", "shell_1", status, out); ok {
+	if p2, ok := s.store.AppendToolPart(id, messageID, "bash", "shell_1", status, toolInput, out); ok {
 		s.bus.Publish(event.NewMessagePartUpdated(id, p2, time.Now().UnixMilli()))
 	}
 

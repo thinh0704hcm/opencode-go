@@ -84,7 +84,9 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 		}
 
 		for _, call := range calls {
-			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", "")
+			var toolInput map[string]any
+			_ = json.Unmarshal(call.Input, &toolInput)
+			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", toolInput, "")
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
 
 			if needsPermission(s.tools, call.Name) {
@@ -121,7 +123,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 				s.bus.Publish(event.NewPermissionReplied(sessionID, preq.ID, reply))
 				if reply == "reject" {
 					out := "permission denied"
-					p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", out)
+					p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)
 					s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
 					messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
 					continue
@@ -133,7 +135,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 			if isError {
 				status = "error"
 			}
-			p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, status, out)
+			p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, status, toolInput, out)
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
 			messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
 		}

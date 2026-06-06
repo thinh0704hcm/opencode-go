@@ -102,10 +102,23 @@ type PartTime struct {
 	End   *int64 `json:"end,omitempty"`
 }
 
-// PartState holds tool-part execution status for "tool" parts.
+// PartState holds tool-part execution status for "tool" parts. The shape
+// mirrors real opencode 1.16.0 so the TUI's tool renderer can read
+// state.input/metadata/time without hitting undefined fields. Title always
+// serializes as "" like real; Input/Metadata/Time stay omitempty.
 type PartState struct {
-	Status string `json:"status"` // pending|running|completed|error
-	Output string `json:"output,omitempty"`
+	Status   string         `json:"status"` // pending|running|completed|error
+	Input    map[string]any `json:"input,omitempty"`
+	Output   string         `json:"output,omitempty"`
+	Title    string         `json:"title"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+	Time     *PartStateTime `json:"time,omitempty"`
+}
+
+// PartStateTime holds a tool-part's start (and optional end) timestamps in ms.
+type PartStateTime struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end,omitempty"`
 }
 
 // MessageWithParts is the {info, parts} shape returned by GET .../message.
