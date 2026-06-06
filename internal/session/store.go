@@ -382,6 +382,25 @@ func (s *Store) AppendStepFinish(sessionID, messageID, reason string, cost float
 	return copyPart(*p), true
 }
 
+// SetAssistantUsage sets the token accounting on an assistant message's info
+// from a provider usage object. Reasoning and cache counts stay 0 (the
+// OpenAI-compatible stream does not break those out). No-op if missing.
+func (s *Store) SetAssistantUsage(sessionID, messageID string, input, output, total int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return
+	}
+	mwp.Info.Tokens = &Tokens{
+		Total:     int64(total),
+		Input:     int64(input),
+		Output:    int64(output),
+		Reasoning: 0,
+		Cache:     TokenCache{Read: 0, Write: 0},
+	}
+}
+
 // returns a copy of its info.
 func (s *Store) CompleteAssistantMessage(sessionID, messageID string) (Message, bool) {
 	s.mu.Lock()

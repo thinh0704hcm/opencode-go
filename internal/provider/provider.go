@@ -53,6 +53,13 @@ type ChatRequest struct {
 	Tools    []ToolSchema
 }
 
+// Usage carries token accounting parsed from a provider stream's usage object.
+type Usage struct {
+	Input  int
+	Output int
+	Total  int
+}
+
 // ChatChunk is one streamed delta from the provider.
 type ChatChunk struct {
 	TextDelta      string
@@ -60,6 +67,7 @@ type ChatChunk struct {
 	FinishReason   string
 	Err            error
 	ToolCall       *ToolCall // non-nil when the model emitted a complete tool call
+	Usage          *Usage    // non-nil when the chunk carries token usage (usually final)
 }
 
 // Provider streams chat completions (architecture §3.1).

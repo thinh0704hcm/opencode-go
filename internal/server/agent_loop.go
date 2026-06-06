@@ -61,6 +61,12 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 			if chunk.ToolCall != nil {
 				calls = append(calls, *chunk.ToolCall)
 			}
+			if chunk.Usage != nil {
+				// Record token accounting on the assistant message. Last usage
+				// chunk wins for a multi-step turn (each step's final chunk
+				// carries cumulative usage from the provider).
+				s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total)
+			}
 		}
 
 		// No tool calls: the model produced its final text turn.

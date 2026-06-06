@@ -40,10 +40,15 @@ func NewOpenAI(id, baseURL, apiKey, model string, client *http.Client) *OpenAI {
 func (o *OpenAI) ID() string { return o.id }
 
 type chatCompletionsRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
-	Tools    []chatTool    `json:"tools,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []ChatMessage  `json:"messages"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Tools         []chatTool     `json:"tools,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatTool struct {
@@ -66,6 +71,11 @@ type sseChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 type sseToolCallDelta struct {
@@ -116,7 +126,7 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 		}
 	}
 
-	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, Tools: tools})
+	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools})
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +200,27 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue // tolerate non-standard keepalive lines
 			}
+
+			// A usage object usually arrives on the final chunk, which may carry
+			// empty choices. Emit a usage-only ChatChunk so the turn can record
+			// token accounting even when there is no text/reasoning/finish.
+			var usage *Usage
+			if chunk.Usage != nil {
+				usage = &Usage{
+					Input:  chunk.Usage.PromptTokens,
+					Output: chunk.Usage.CompletionTokens,
+					Total:  chunk.Usage.TotalTokens,
+				}
+			}
+
 			if len(chunk.Choices) == 0 {
+				if usage != nil {
+					select {
+					case out <- ChatChunk{Usage: usage}:
+					case <-ctx.Done():
+						return
+					}
+				}
 				continue
 			}
 			ch := chunk.Choices[0]
