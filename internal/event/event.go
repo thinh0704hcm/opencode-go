@@ -183,6 +183,12 @@ func NewPermissionAsked(req any) Event {
 	return Event{ID: newID("evt"), Type: TypePermissionAsked, Properties: req}
 }
 
+// NewPermissionUpdated creates a permission.updated event; properties is the
+// Permission object directly (the opencode TUI consumes this shape).
+func NewPermissionUpdated(perm any) Event {
+	return Event{ID: newID("evt"), Type: TypePermissionUpdated, Properties: perm}
+}
+
 // IsFinalAssistant reports whether this message.updated event is the completed
 // assistant message (used by GuaranteedDelivery).
 func (e Event) IsFinalAssistant() bool {

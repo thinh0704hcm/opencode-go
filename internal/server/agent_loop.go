@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
@@ -73,6 +74,31 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 			if needsPermission(s.tools, call.Name) {
 				preq := s.perms.Ask("per_"+call.ID, sessionID, call.Name)
 				s.bus.Publish(event.NewPermissionAsked(preq))
+				// Also emit permission.updated with a Permission-shaped object so
+				// the opencode 1.16.0 TUI (which listens for permission.updated)
+				// renders an approve prompt. id MUST equal preq.ID so the TUI's
+				// reply routes back to the gate.
+				pattern := string(call.Input)
+				var args map[string]any
+				if json.Unmarshal(call.Input, &args) == nil {
+					if v, ok := args["command"].(string); ok && v != "" {
+						pattern = v
+					} else if v, ok := args["path"].(string); ok && v != "" {
+						pattern = v
+					}
+				}
+				permObj := map[string]any{
+					"id":        preq.ID,
+					"type":      call.Name,
+					"pattern":   pattern,
+					"sessionID": sessionID,
+					"messageID": messageID,
+					"callID":    call.ID,
+					"title":     "Allow tool: " + call.Name,
+					"metadata":  map[string]any{},
+					"time":      map[string]any{"created": time.Now().UnixMilli()},
+				}
+				s.bus.Publish(event.NewPermissionUpdated(permObj))
 				reply := s.perms.Wait(ctx, preq, permTimeout)
 				s.bus.Publish(event.NewPermissionReplied(sessionID, preq.ID, reply))
 				if reply == "reject" {
