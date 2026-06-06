@@ -167,18 +167,3 @@ func (grepTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	out, truncated := TruncateOutput([]byte(b.String()))
 	return Result{Output: out, Truncated: truncated}, nil
 }
-
-// itoa converts a non-negative int to its decimal string without strconv.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}

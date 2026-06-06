@@ -252,7 +252,13 @@ func (p *Pty) IssueTicket() string {
 	_, _ = rand.Read(b)
 	t := hex.EncodeToString(b)
 	p.mu.Lock()
-	p.tickets[t] = time.Now().UnixMilli() + 30_000
+	now := time.Now().UnixMilli()
+	for k, exp := range p.tickets {
+		if exp < now {
+			delete(p.tickets, k)
+		}
+	}
+	p.tickets[t] = now + 30_000
 	p.mu.Unlock()
 	return t
 }
@@ -267,6 +273,9 @@ func (p *Pty) RedeemTicket(t string) bool {
 		return false
 	}
 	delete(p.tickets, t)
+	if exp < now {
+		return false
+	}
 	return now <= exp
 }
 
