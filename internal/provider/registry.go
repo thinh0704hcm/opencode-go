@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"time"
 
 	"github.com/opencode-go/opencode-go/internal/config"
 )
@@ -79,6 +80,20 @@ func BuildRegistry(cfg *config.Config) *Registry {
 			models = m
 		}
 
+		// Auto-populate models from the provider's /v1/models endpoint when it
+		// has a resolved baseURL (ports the ninerouter-models opencode plugin
+		// which opencode-go cannot run). Additive + fail-open: existing entries
+		// are preserved and any fetch error leaves models untouched. The fetch
+		// is TTL-cached so per-request BuildRegistry calls stay fast.
+		if baseURL := resolvedBaseURL(obj); baseURL != "" {
+			for _, mid := range cachedFetchProviderModels(id+"|"+baseURL, baseURL, resolvedAPIKey(obj), 3*time.Second) {
+				if _, exists := models[mid]; exists {
+					continue
+				}
+				models[mid] = map[string]any{"id": mid, "name": humanizeModelID(mid)}
+			}
+		}
+
 		info := ProviderInfo{
 			ID:     id,
 			Name:   name,
@@ -131,6 +146,19 @@ func resolvedAPIKey(obj map[string]any) string {
 		return ""
 	}
 	if s, ok := opts["apiKey"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// resolvedBaseURL returns the interpolated options.baseURL value from a provider
+// object ("" if absent/empty). Operates on cfg.Raw (post env interpolation).
+func resolvedBaseURL(obj map[string]any) string {
+	opts, ok := obj["options"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if s, ok := opts["baseURL"].(string); ok {
 		return s
 	}
 	return ""
