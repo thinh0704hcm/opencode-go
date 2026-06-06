@@ -58,6 +58,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /mcp/{name}/auth", s.handleMCPAuth)
 	mux.HandleFunc("POST /mcp/{name}/auth/authenticate", s.handleMCPAuthAuthenticate)
 	mux.HandleFunc("POST /mcp/{name}/auth/callback", s.handleMCPAuthCallback)
+
+	// PTY namespace routes.
+	mux.HandleFunc("GET /pty", s.handlePtyList)
+	mux.HandleFunc("POST /pty", s.handlePtyCreate)
+	mux.HandleFunc("GET /pty/shells", s.handlePtyShells)
+	mux.HandleFunc("GET /pty/{ptyID}", s.handlePtyGet)
+	mux.HandleFunc("PUT /pty/{ptyID}", s.handlePtyUpdate)
+	mux.HandleFunc("DELETE /pty/{ptyID}", s.handlePtyRemove)
+	mux.HandleFunc("POST /pty/{ptyID}/connect-token", s.handlePtyConnectToken)
+	mux.HandleFunc("GET /pty/{ptyID}/connect", s.handlePtyConnect)
+
 	mux.HandleFunc("GET /formatter", s.handleFormatter)
 	mux.HandleFunc("GET /lsp", s.handleLSP)
 	mux.HandleFunc("GET /session/status", s.handleSessionStatus)

@@ -10,6 +10,7 @@ import (
 	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/permission"
 	"github.com/opencode-go/opencode-go/internal/provider"
+	"github.com/opencode-go/opencode-go/internal/pty"
 	"github.com/opencode-go/opencode-go/internal/session"
 	"github.com/opencode-go/opencode-go/internal/tool"
 )
@@ -27,6 +28,7 @@ type Server struct {
 	logger   *slog.Logger
 	tools    *tool.Registry
 	workdir  string
+	ptys     *pty.Registry
 
 	cancelMu sync.Mutex
 	cancels  map[string]context.CancelFunc
@@ -66,6 +68,7 @@ func New(opts Options) *Server {
 		logger:   logger,
 		tools:    tools,
 		workdir:  workdir,
+		ptys:     pty.NewRegistry(),
 		cancels:  map[string]context.CancelFunc{},
 	}
 }
