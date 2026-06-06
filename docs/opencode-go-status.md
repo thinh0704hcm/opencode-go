@@ -1,5 +1,19 @@
 # opencode-go — Status
 
+## Review status (final)
+- Verdict: **SHIP** for single-user loopback deployment (independent reviewer pass + re-review confirmed).
+- Memory: opencode-go idle RSS ~8.8 MB vs ~243 MB headless Node opencode (~27x lighter), ~630-660 MB full Node TUI session (~70x lighter).
+- All CRITICAL + MAJOR review findings fixed and verified in live code:
+  - C1 PTY child reaping (no zombies)
+  - C2 bash output capped during capture (OOM vector closed)
+  - M1 loopback-bind enforcement + mandatory PTY connect ticket (no unauth shell)
+  - M2 closeSubs sets closed flag (no post-EOF subscriber hang)
+  - M3 bash surfaces non-zero exit status
+  - M4 non-blocking guaranteed event delivery (no per-subscriber 5s stall)
+- Minors fixed: aborted-turn idle dedup, provider-error secret scrubbing, wider secret regex, errors.Is(io.EOF), dead-code removal (maskConfigAPIKeys, itoa), PTY ticket-map expiry sweep.
+- Residual (non-blocking, documented): sandbox O_NOFOLLOW helper added but tool I/O not yet rewired to use it (low-risk TOCTOU on single-tenant loopback); token cost shows 0 (no pricing table); /vcs/apply, live MCP client, some experimental/* are stubs.
+- Quality gates: go build / go vet / go test -race ./... all green.
+
 ## Goal / Scope
 opencode-go is a from-scratch Go reimplementation of the opencode server (targets
 opencode 1.16.0 wire protocol), built as a memory-light, runtime-free (no Bun/Node)
@@ -67,3 +81,23 @@ host. Scope decision = "Option A" (full drop-in incl. TUI).
 
 ## Commit history
 The milestone commits are in `git log` (M1..M5 + agent brain + shell + render fixes).
+
+## Commit log (key)
+- M1 milestone: bot happy path (health, SSE, session create, prompt_async, messages, permissions)
+- M2 milestone: 20-endpoint TUI boot set + ?directory= middleware + secret redaction
+- M3 milestone: session CRUD + synchronous prompt (POST /session/{id}/message)
+- M4 milestone: tool registry + sandbox + bounded permission-gated agent loop
+- M5 milestone: VCS (real git), MCP (config-backed), PTY (creack/pty + websocket), LSP stub
+- agent brain: embedded opencode default.txt system prompt + real tool descriptions
+- integrated shell: POST /session/{id}/shell
+- render-fidelity fixes: sortable IDs, cost/tokens always serialized, permission.updated,
+  tool_calls threading, rich tool state, upsert-by-callID
+- PTY ws protocol: text=raw output + binary 0x00+JSON cursor meta, buffered single-owner fan-out
+- route cleanup: GET /session, /session/{id}/todo, /diff
+- token-usage parsing
+- review fixes:
+  - 467ad30 security M1 (loopback bind + PTY connect ticket)
+  - 4b60b96 C1/C2/M2/M3 (PTY reaping, bash output cap, closeSubs flag, non-zero exit)
+  - b6030dd review-A
+  - d3fd43d review-A2
+  - 3289226 review-C cleanups
