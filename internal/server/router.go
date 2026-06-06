@@ -21,11 +21,16 @@ func (s *Server) routes() http.Handler {
 	// Session create.
 	mux.HandleFunc("POST /session", s.handleSessionCreate)
 
+	// Session list (method-distinct from POST /session above).
+	mux.HandleFunc("GET /session", s.handleSessionList)
+
 	// Session lifecycle (get/update/delete/children/abort).
 	mux.HandleFunc("GET /session/{id}", s.handleSessionGet)
 	mux.HandleFunc("PATCH /session/{id}", s.handleSessionUpdate)
 	mux.HandleFunc("DELETE /session/{id}", s.handleSessionDelete)
 	mux.HandleFunc("GET /session/{id}/children", s.handleSessionChildren)
+	mux.HandleFunc("GET /session/{id}/todo", s.handleSessionTodo)
+	mux.HandleFunc("GET /session/{id}/diff", s.handleSessionDiff)
 	mux.HandleFunc("POST /session/{id}/abort", s.handleSessionAbort)
 
 	// Prompt (async) + messages.

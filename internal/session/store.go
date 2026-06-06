@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"sort"
 	"sync"
 	"time"
 )
@@ -112,6 +113,21 @@ func (s *Store) CreateSession(parentID, title, directory string) Session {
 	s.messages[sess.ID] = nil
 	s.mu.Unlock()
 	return *sess
+}
+
+// List returns a snapshot copy of all sessions sorted by Time.Created
+// (ascending). Callers receive value copies, so the slice is safe to mutate.
+func (s *Store) List() []Session {
+	s.mu.RLock()
+	out := make([]Session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		out = append(out, *sess)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Time.Created < out[j].Time.Created
+	})
+	return out
 }
 
 // GetSession returns a copy of the session and whether it exists.
@@ -294,6 +310,34 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 	end := int64(0)
 	if status == "completed" || status == "error" {
 		end = now
+	}
+	// Upsert by callID: the agent loop calls this twice per tool ("running"
+	// then "completed"/"error"). Update the same part in place so the TUI sees
+	// one part transition rather than an orphaned spinner. Empty callID always
+	// appends to avoid collapsing unrelated parts.
+	if callID != "" {
+		for i := range mwp.Parts {
+			ep := &mwp.Parts[i]
+			if ep.Type != "tool" || ep.CallID != callID {
+				continue
+			}
+			if ep.State == nil {
+				ep.State = &PartState{}
+			}
+			if ep.State.Time == nil {
+				ep.State.Time = &PartStateTime{Start: now}
+			}
+			ep.State.Status = status
+			if input != nil {
+				ep.State.Input = input
+			}
+			ep.State.Output = output
+			ep.State.Metadata = map[string]any{"output": output, "description": ""}
+			if end != 0 {
+				ep.State.Time.End = end
+			}
+			return copyPart(*ep), true
+		}
 	}
 	mwp.Parts = append(mwp.Parts, Part{
 		ID:        NewID("prt"),

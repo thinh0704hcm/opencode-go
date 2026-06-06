@@ -6,6 +6,24 @@ import (
 	"github.com/opencode-go/opencode-go/internal/event"
 )
 
+// handleSessionList serves GET /session, returning a JSON array of all
+// sessions (empty array on a fresh server, never null).
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.List())
+}
+
+// handleSessionTodo serves GET /session/{id}/todo. No todos feature exists, so
+// it returns an empty JSON array.
+func (s *Server) handleSessionTodo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []interface{}{})
+}
+
+// handleSessionDiff serves GET /session/{id}/diff. No diffs feature exists, so
+// it returns an empty JSON array (matches real opencode's empty case).
+func (s *Server) handleSessionDiff(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []interface{}{})
+}
+
 // handleSessionGet serves GET /session/{id}, returning the Session object.
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
