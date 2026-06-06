@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // OpenAI is an OpenAI-compatible streaming client (architecture §3.1).
@@ -131,24 +133,65 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if o.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
-	}
+	// Retry transient provider failures (transport errors and retryable
+	// statuses such as 429/5xx) up to maxAttempts, mirroring the TUI behavior.
+	// The body is consumed by Do, so the request is rebuilt on every attempt.
+	const maxAttempts = 3
+	var resp *http.Response
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		if o.apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+		}
 
-	resp, err := o.client.Do(httpReq)
-	if err != nil {
-		return nil, err
+		r, err := o.client.Do(httpReq)
+		if err != nil {
+			// Transport error: retryable.
+			lastErr = err
+			if attempt < maxAttempts {
+				if werr := retryBackoff(ctx, attempt, ""); werr != nil {
+					return nil, werr
+				}
+				continue
+			}
+			return nil, err
+		}
+
+		if r.StatusCode == http.StatusOK {
+			resp = r
+			break
+		}
+
+		if isRetryableStatus(r.StatusCode) {
+			b, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
+			retryAfter := r.Header.Get("Retry-After")
+			r.Body.Close()
+			lastErr = fmt.Errorf("provider returned status %d: %s", r.StatusCode, string(b))
+			if attempt < maxAttempts {
+				if werr := retryBackoff(ctx, attempt, retryAfter); werr != nil {
+					return nil, werr
+				}
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Non-retryable non-2xx (e.g. 400/401/403/404): fail immediately.
+		b, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
+		r.Body.Close()
+		return nil, fmt.Errorf("provider returned status %d: %s", r.StatusCode, string(b))
 	}
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		resp.Body.Close()
-		return nil, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, string(b))
+	if resp == nil {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("provider request failed after %d attempts", maxAttempts)
 	}
 
 	out := make(chan ChatChunk)
@@ -285,4 +328,30 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 	}()
 
 	return out, nil
+}
+
+// isRetryableStatus reports whether an HTTP status warrants a retry.
+func isRetryableStatus(code int) bool {
+	return code == 429 || code == 500 || code == 502 || code == 503 || code == 504
+}
+
+// retryBackoff waits before the next attempt, honoring a small Retry-After
+// header when present and aborting on context cancellation/timeout.
+func retryBackoff(ctx context.Context, attempt int, retryAfter string) error {
+	d := time.Duration(attempt) * 500 * time.Millisecond
+	if retryAfter != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && secs > 0 {
+			ra := time.Duration(secs) * time.Second
+			if ra > 5*time.Second {
+				ra = 5 * time.Second
+			}
+			d = ra
+		}
+	}
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
