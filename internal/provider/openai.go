@@ -43,16 +43,45 @@ type chatCompletionsRequest struct {
 	Model    string        `json:"model"`
 	Messages []ChatMessage `json:"messages"`
 	Stream   bool          `json:"stream"`
+	Tools    []chatTool    `json:"tools,omitempty"`
+}
+
+type chatTool struct {
+	Type     string           `json:"type"`
+	Function chatToolFunction `json:"function"`
+}
+
+type chatToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 type sseChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
+			Content          string             `json:"content"`
+			ReasoningContent string             `json:"reasoning_content"`
+			ToolCalls        []sseToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+}
+
+type sseToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type accumulatingToolCall struct {
+	id   string
+	name string
+	args strings.Builder
 }
 
 // StreamChat opens the provider SSE stream and emits ChatChunks.
@@ -68,7 +97,26 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 	}
 	msgs = append(msgs, req.Messages...)
 
-	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true})
+	var tools []chatTool
+	if len(req.Tools) > 0 {
+		tools = make([]chatTool, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			params := t.Parameters
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			tools = append(tools, chatTool{
+				Type: "function",
+				Function: chatToolFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  params,
+				},
+			})
+		}
+	}
+
+	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, Tools: tools})
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +148,27 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+		toolCalls := map[int]*accumulatingToolCall{}
+		var toolOrder []int
+
+		emitToolCalls := func() bool {
+			for _, idx := range toolOrder {
+				acc := toolCalls[idx]
+				tc := ChatChunk{ToolCall: &ToolCall{
+					ID:    acc.id,
+					Name:  acc.name,
+					Input: json.RawMessage(acc.args.String()),
+				}}
+				select {
+				case out <- tc:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
+
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data:") {
@@ -110,6 +179,11 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 				continue
 			}
 			if data == "[DONE]" {
+				if len(toolOrder) > 0 {
+					if !emitToolCalls() {
+						return
+					}
+				}
 				return
 			}
 			var chunk sseChunk
@@ -120,16 +194,55 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 				continue
 			}
 			ch := chunk.Choices[0]
+
+			for _, tcd := range ch.Delta.ToolCalls {
+				acc := toolCalls[tcd.Index]
+				if acc == nil {
+					acc = &accumulatingToolCall{}
+					toolCalls[tcd.Index] = acc
+					toolOrder = append(toolOrder, tcd.Index)
+				}
+				if tcd.ID != "" {
+					acc.id = tcd.ID
+				}
+				if tcd.Function.Name != "" {
+					acc.name = tcd.Function.Name
+				}
+				if tcd.Function.Arguments != "" {
+					acc.args.WriteString(tcd.Function.Arguments)
+				}
+			}
+
 			cc := ChatChunk{TextDelta: ch.Delta.Content, ReasoningDelta: ch.Delta.ReasoningContent}
 			if ch.FinishReason != nil {
 				cc.FinishReason = *ch.FinishReason
 			}
+
+			if cc.FinishReason == "tool_calls" && len(toolOrder) > 0 {
+				if !emitToolCalls() {
+					return
+				}
+				select {
+				case out <- ChatChunk{FinishReason: "tool_calls"}:
+				case <-ctx.Done():
+					return
+				}
+				toolCalls = map[int]*accumulatingToolCall{}
+				toolOrder = nil
+				continue
+			}
+
 			if cc.TextDelta == "" && cc.ReasoningDelta == "" && cc.FinishReason == "" {
 				continue
 			}
 			select {
 			case out <- cc:
 			case <-ctx.Done():
+				return
+			}
+		}
+		if len(toolOrder) > 0 {
+			if !emitToolCalls() {
 				return
 			}
 		}
