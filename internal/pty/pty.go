@@ -69,7 +69,6 @@ func (r *Registry) Create(id, title, command, cwd string) (*Pty, error) {
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
