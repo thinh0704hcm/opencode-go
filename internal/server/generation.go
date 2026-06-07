@@ -132,6 +132,7 @@ func (s *Server) finishGeneration(sessionID, messageID string) {
 		return
 	}
 	s.bus.Publish(event.NewMessageUpdated(sessionID, info, true))
+	s.store.PersistSession(sessionID)
 }
 
 // joinTexts concatenates prompt text parts with newlines.

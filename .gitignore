@@ -4,3 +4,4 @@ bin/
 .env
 auth.json
 *.tmp
+.opencode-go/

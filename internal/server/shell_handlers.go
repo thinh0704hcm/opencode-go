@@ -108,6 +108,7 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
 	// Complete the assistant message and emit the guaranteed terminal events.
 	if info, ok := s.store.CompleteAssistantMessage(id, messageID); ok {
 		s.bus.Publish(event.NewMessageUpdated(id, info, true))
+		s.store.PersistSession(id)
 	}
 	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
 	s.bus.Publish(event.NewSessionIdle(id))

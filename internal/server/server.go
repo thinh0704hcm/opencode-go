@@ -46,6 +46,7 @@ type Options struct {
 	Logger   *slog.Logger
 	Tools    *tool.Registry
 	Workdir  string
+	DataDir  string
 }
 
 // New builds a Server with its in-memory bus, store, and permission gate.
@@ -62,9 +63,17 @@ func New(opts Options) *Server {
 	if workdir == "" {
 		workdir = "."
 	}
+	st := session.NewStore()
+	if opts.DataDir != "" {
+		if err := st.SetPersistDir(opts.DataDir); err != nil {
+			logger.Error("session persistence disabled", "err", err)
+		} else if err := st.Load(); err != nil {
+			logger.Error("session load failed", "err", err)
+		}
+	}
 	return &Server{
 		bus:      event.NewBus(),
-		store:    session.NewStore(),
+		store:    st,
 		perms:    permission.NewStore(),
 		provider: opts.Provider,
 		model:    opts.Model,

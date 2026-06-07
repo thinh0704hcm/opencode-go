@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -107,12 +108,18 @@ func runServe(args []string) error {
 		}
 	}
 
+	dataDir := os.Getenv("OPENCODE_GO_DATA_DIR")
+	if dataDir == "" {
+		dataDir = filepath.Join(workdir, ".opencode-go")
+	}
+
 	srv := server.New(server.Options{
 		Provider: prov,
 		Model:    model,
 		Logger:   logger,
 		Tools:    tool.NewDefaultRegistry(),
 		Workdir:  workdir,
+		DataDir:  dataDir,
 	})
 
 	addr := fmt.Sprintf("%s:%d", *hostname, *port)

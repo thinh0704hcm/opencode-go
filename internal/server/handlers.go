@@ -33,6 +33,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	dir := directoryOf(r)
 	sess := s.store.CreateSession(req.ParentID, req.Title, dir)
+	s.store.PersistSession(sess.ID)
 	writeJSON(w, http.StatusOK, sess)
 }
 

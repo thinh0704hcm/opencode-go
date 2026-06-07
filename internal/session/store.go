@@ -11,9 +11,10 @@ import (
 // Store is an in-memory session/message store guarded by an RWMutex.
 // On-disk persistence is NOT implemented for M1 (architecture §2.2).
 type Store struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	messages map[string][]*MessageWithParts // ses_* -> ordered messages
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	messages   map[string][]*MessageWithParts // ses_* -> ordered messages
+	persistDir string                         // when non-empty, sessions are persisted to <persistDir>/sessions/*.json
 }
 
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"

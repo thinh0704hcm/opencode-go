@@ -62,6 +62,7 @@ func (s *Server) handleSessionUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	s.store.PersistSession(id)
 	s.bus.Publish(event.NewSessionUpdated(id, sess))
 	writeJSON(w, http.StatusOK, sess)
 }
@@ -79,6 +80,7 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	s.store.RemovePersisted(id)
 	s.bus.Publish(event.NewSessionDeleted(sess))
 	writeJSON(w, http.StatusOK, true)
 }
