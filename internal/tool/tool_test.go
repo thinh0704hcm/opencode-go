@@ -101,33 +101,6 @@ func TestWriteThenRead(t *testing.T) {
 	}
 }
 
-func TestEditReplacesFirst(t *testing.T) {
-	tmp := t.TempDir()
-	sb, err := New(tmp)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	r := NewDefaultRegistry()
-
-	if _, err := runTool(t, r, "write", sb, map[string]string{"path": "e.txt", "content": "foo foo"}); err != nil {
-		t.Fatalf("write e.txt: %v", err)
-	}
-	if _, err := runTool(t, r, "edit", sb, map[string]string{"path": "e.txt", "old": "foo", "new": "bar"}); err != nil {
-		t.Fatalf("edit e.txt: %v", err)
-	}
-	res, err := runTool(t, r, "read", sb, map[string]string{"path": "e.txt"})
-	if err != nil {
-		t.Fatalf("read e.txt: %v", err)
-	}
-	if res.Output != "bar foo" {
-		t.Errorf("after edit = %q, want %q", res.Output, "bar foo")
-	}
-
-	if _, err := runTool(t, r, "edit", sb, map[string]string{"path": "e.txt", "old": "missing", "new": "x"}); err == nil {
-		t.Errorf("edit with absent old = nil error, want error")
-	}
-}
-
 func TestBashEcho(t *testing.T) {
 	tmp := t.TempDir()
 	sb, err := New(tmp)
@@ -214,5 +187,41 @@ func TestTruncateOutput(t *testing.T) {
 	}
 	if out != "short" {
 		t.Errorf("TruncateOutput output = %q, want %q", out, "short")
+	}
+}
+
+func TestEditRefusesAmbiguousMatch(t *testing.T) {
+	dir := t.TempDir()
+	sb, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// file with "foo" twice.
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("foo bar foo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in, _ := json.Marshal(map[string]string{"path": "f.txt", "old": "foo", "new": "baz"})
+	_, err = editTool{}.Execute(context.Background(), in, sb)
+	if err == nil {
+		t.Fatal("expected ambiguous-match error, got nil")
+	}
+
+	// empty old refused.
+	in2, _ := json.Marshal(map[string]string{"path": "f.txt", "old": "", "new": "x"})
+	if _, err := (editTool{}).Execute(context.Background(), in2, sb); err == nil {
+		t.Fatal("expected empty-old error, got nil")
+	}
+
+	// unique match succeeds.
+	if err := os.WriteFile(filepath.Join(dir, "g.txt"), []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in3, _ := json.Marshal(map[string]string{"path": "g.txt", "old": "world", "new": "there"})
+	if _, err := (editTool{}).Execute(context.Background(), in3, sb); err != nil {
+		t.Fatalf("unique match should succeed: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "g.txt"))
+	if string(got) != "hello there" {
+		t.Fatalf("got %q", string(got))
 	}
 }

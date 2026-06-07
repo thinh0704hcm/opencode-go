@@ -21,6 +21,12 @@ func (e constErr) Error() string { return string(e) }
 // errOldNotFound is returned by editTool when the target text is absent.
 const errOldNotFound = constErr("old string not found")
 
+// errEmptyOld is returned by editTool when old string is empty (whole-file hazard).
+const errEmptyOld = constErr("edit: old string must not be empty")
+
+// errOldAmbiguous is returned by editTool when old string matches multiple locations.
+const errOldAmbiguous = constErr("edit: old string matches multiple locations; provide more context to disambiguate")
+
 // writeTool creates or overwrites a file with the provided content.
 type writeTool struct{}
 
@@ -77,10 +83,18 @@ func (editTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	if err != nil {
 		return Result{}, err
 	}
-	if !strings.Contains(string(content), in.Old) {
+	src := string(content)
+	if in.Old == "" {
+		return Result{}, errEmptyOld
+	}
+	n := strings.Count(src, in.Old)
+	if n == 0 {
 		return Result{}, errOldNotFound
 	}
-	updated := strings.Replace(string(content), in.Old, in.New, 1)
+	if n > 1 {
+		return Result{}, errOldAmbiguous
+	}
+	updated := strings.Replace(src, in.Old, in.New, 1)
 	wf, err := sb.OpenFileNoFollow(in.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return Result{}, err
