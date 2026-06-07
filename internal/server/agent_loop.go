@@ -24,13 +24,13 @@ const permTimeout = 60 * time.Second
 // the assistant message + busy status beforehand and for finishGeneration +
 // session.idle afterward; this method ONLY performs the provider+tool iteration,
 // emitting text/reasoning deltas and tool parts.
-func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string, callerSystem string) {
+func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string, callerSystem string) string {
 	messages := []provider.ChatMessage{{Role: "user", Content: joinTexts(texts)}}
 
 	sb, err := tool.New(s.workdir)
 	if err != nil {
 		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": err.Error()}))
-		return
+		return ""
 	}
 
 	for iter := 0; iter < maxAgentIterations; iter++ {
@@ -44,10 +44,11 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 		stream, err := s.provider.StreamChat(ctx, req)
 		if err != nil {
 			s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(err.Error())}))
-			return
+			return ""
 		}
 
 		var calls []provider.ToolCall
+		var finishReason string
 		for chunk := range stream {
 			if chunk.Err != nil {
 				s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(chunk.Err.Error())}))
@@ -68,11 +69,14 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 				// carries cumulative usage from the provider).
 				s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total)
 			}
+			if chunk.FinishReason != "" {
+				finishReason = chunk.FinishReason
+			}
 		}
 
 		// No tool calls: the model produced its final text turn.
 		if len(calls) == 0 {
-			return
+			return finishReason
 		}
 
 		// OpenAI protocol: the assistant message carrying the tool_calls MUST
@@ -154,6 +158,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 
 	// Exhausted the iteration budget without a final text turn.
 	s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "max tool iterations reached"}))
+	return ""
 }
 
 // combineSystem appends a caller-supplied system string after the built-in

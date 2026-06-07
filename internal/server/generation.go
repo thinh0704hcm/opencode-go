@@ -68,7 +68,7 @@ func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID str
 		s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
 	}
 
-	s.runAgentLoop(ctx, sessionID, messageID, modelID, texts, callerSystem)
+	finishReason := s.runAgentLoop(ctx, sessionID, messageID, modelID, texts, callerSystem)
 
 	// If the turn was aborted/cancelled (ctx error), the abort handler
 	// (handleSessionAbort) owns the terminal session.status{idle} +
@@ -76,7 +76,10 @@ func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID str
 	// (not a clean "stop") and finalize the message so it is not left
 	// dangling, but do NOT emit a second session.idle here.
 	aborted := ctx.Err() != nil
-	reason := "stop"
+	reason := finishReason
+	if reason == "" {
+		reason = "stop"
+	}
 	if aborted {
 		reason = "aborted"
 	}
