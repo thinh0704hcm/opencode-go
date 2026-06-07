@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,11 +25,12 @@ func (readTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{}, err
 	}
-	abs, err := sb.Resolve(in.Path)
+	f, err := sb.OpenFileNoFollow(in.Path, os.O_RDONLY, 0)
 	if err != nil {
 		return Result{}, err
 	}
-	content, err := os.ReadFile(abs)
+	content, err := io.ReadAll(f)
+	f.Close()
 	if err != nil {
 		return Result{}, err
 	}

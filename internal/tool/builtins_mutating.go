@@ -35,15 +35,20 @@ func (writeTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{}, err
 	}
-	abs, err := sb.Resolve(in.Path)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(sb.Root(), in.Path)), 0o755); err != nil {
+		return Result{}, err
+	}
+	f, err := sb.OpenFileNoFollow(in.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return Result{}, err
+	_, werr := f.WriteString(in.Content)
+	cerr := f.Close()
+	if werr != nil {
+		return Result{}, werr
 	}
-	if err := os.WriteFile(abs, []byte(in.Content), 0o644); err != nil {
-		return Result{}, err
+	if cerr != nil {
+		return Result{}, cerr
 	}
 	return Result{Output: "wrote " + in.Path}, nil
 }
@@ -63,11 +68,12 @@ func (editTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{}, err
 	}
-	abs, err := sb.Resolve(in.Path)
+	rf, err := sb.OpenFileNoFollow(in.Path, os.O_RDONLY, 0)
 	if err != nil {
 		return Result{}, err
 	}
-	content, err := os.ReadFile(abs)
+	content, err := io.ReadAll(rf)
+	rf.Close()
 	if err != nil {
 		return Result{}, err
 	}
@@ -75,8 +81,17 @@ func (editTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 		return Result{}, errOldNotFound
 	}
 	updated := strings.Replace(string(content), in.Old, in.New, 1)
-	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
+	wf, err := sb.OpenFileNoFollow(in.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
 		return Result{}, err
+	}
+	_, werr := wf.WriteString(updated)
+	cerr := wf.Close()
+	if werr != nil {
+		return Result{}, werr
+	}
+	if cerr != nil {
+		return Result{}, cerr
 	}
 	return Result{Output: "edited " + in.Path}, nil
 }

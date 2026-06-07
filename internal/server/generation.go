@@ -83,7 +83,19 @@ func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID str
 
 	// Append + publish the terminal step-finish part before the final
 	// message.updated, matching real opencode's part ordering.
-	if sf, ok := s.store.AppendStepFinish(sessionID, messageID, reason, 0, &session.Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: session.TokenCache{Read: 0, Write: 0}}); ok {
+	// Compute real cost from the tokens recorded during the turn.
+	var stepTokens *session.Tokens
+	var stepCost float64
+	if info, ok := s.store.MessageInfo(sessionID, messageID); ok {
+		if info.Tokens != nil {
+			stepTokens = info.Tokens
+			stepCost = computeCost(info.ModelID, info.Tokens.Input, info.Tokens.Output)
+		}
+	}
+	if stepTokens == nil {
+		stepTokens = &session.Tokens{}
+	}
+	if sf, ok := s.store.AppendStepFinish(sessionID, messageID, reason, stepCost, stepTokens); ok {
 		s.bus.Publish(event.NewMessagePartUpdated(sessionID, sf, time.Now().UnixMilli()))
 	}
 

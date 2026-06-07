@@ -40,6 +40,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /session/{id}/message", s.handleGetMessages)
 	mux.HandleFunc("GET /session/{id}/message/{messageID}", s.handleGetMessage)
 
+	// Read-only file search/read (real-server parity).
+	mux.HandleFunc("GET /find/file", s.handleFindFile)
+	mux.HandleFunc("GET /file", s.handleFileRead)
+
 	// Permission reply: primary + fallback, both wired to one gate (§4.2/B2).
 	mux.HandleFunc("POST /permission/{requestID}/reply", s.handlePermissionReply)
 	mux.HandleFunc("POST /session/{sessionID}/permissions/{permissionID}", s.handlePermissionRespond)
