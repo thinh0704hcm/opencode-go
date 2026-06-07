@@ -2,34 +2,17 @@ package server
 
 import (
 	"net/http"
-
-	"github.com/opencode-go/opencode-go/internal/config"
 )
 
-// mcpStatus is one MCP server entry in GET /mcp. Only the name (map key) and a
-// derived status are exposed; the command/url/environment are never emitted so
-// no secrets leak. Error is optional and omitted when empty.
-type mcpStatus struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
-}
-
-// handleMCP serves GET /mcp. It returns a map keyed by configured MCP server
-// name with a derived status, sourced from config.Load(dir).Raw["mcp"]. Since
-// this build does NOT spawn/connect MCP clients, every configured server is
-// reported as "disconnected". When no mcp config exists, it returns {} (an
-// empty object, never null). REDACTION: only name+status are emitted.
+// handleMCP serves GET /mcp. It returns the MCP manager's real per-server
+// status (name, status, error, toolCount). When no manager is configured it
+// returns an empty array. REDACTION: command/url/environment are never emitted.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	out := map[string]mcpStatus{}
-
-	cfg := config.Load(directoryParam(r))
-	if mcpRaw, ok := cfg.Raw["mcp"].(map[string]any); ok {
-		for name := range mcpRaw {
-			out[name] = mcpStatus{Status: "disconnected"}
-		}
+	if s.mcp == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
 	}
-
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, s.mcp.Status())
 }
 
 // handleMCPConnect serves POST /mcp/{name}/connect. The real MCP client is not

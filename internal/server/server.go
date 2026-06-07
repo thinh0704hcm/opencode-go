@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opencode-go/opencode-go/internal/config"
 	"github.com/opencode-go/opencode-go/internal/event"
+	"github.com/opencode-go/opencode-go/internal/mcp"
 	"github.com/opencode-go/opencode-go/internal/permission"
 	"github.com/opencode-go/opencode-go/internal/provider"
 	"github.com/opencode-go/opencode-go/internal/pty"
@@ -30,6 +32,7 @@ type Server struct {
 	model    string // default model id passed to the provider
 	logger   *slog.Logger
 	tools    *tool.Registry
+	mcp      *mcp.Manager
 	workdir  string
 	ptys     *pty.Registry
 
@@ -63,6 +66,10 @@ func New(opts Options) *Server {
 	if workdir == "" {
 		workdir = "."
 	}
+	mcpMgr := mcp.NewManager(loadMCPSection(workdir))
+	for _, adapter := range mcpMgr.Adapters() {
+		tools.Register(adapter)
+	}
 	st := session.NewStore()
 	if opts.DataDir != "" {
 		if err := st.SetPersistDir(opts.DataDir); err != nil {
@@ -79,6 +86,7 @@ func New(opts Options) *Server {
 		model:    opts.Model,
 		logger:   logger,
 		tools:    tools,
+		mcp:      mcpMgr,
 		workdir:  workdir,
 		ptys:     pty.NewRegistry(),
 		cancels:  map[string]context.CancelFunc{},
@@ -136,6 +144,9 @@ func (s *Server) ListenAndServe(addr string) error {
 
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.mcp != nil {
+		s.mcp.Shutdown()
+	}
 	if s.http == nil {
 		return nil
 	}
@@ -144,3 +155,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // heartbeatInterval keeps idle SSE streams alive (architecture §2.3/§7.3).
 const heartbeatInterval = 15 * time.Second
+
+// loadMCPSection loads the "mcp" config section (server name -> config) from the
+// workdir, returning nil when absent.
+func loadMCPSection(workdir string) map[string]any {
+	// MCP auto-connect is opt-in: spawning configured MCP servers at boot is
+	// off by default so a restart never unexpectedly launches heavy subprocesses
+	// (browsers, etc.) on constrained hosts. Set OPENCODE_GO_MCP=1 to enable.
+	if v := os.Getenv("OPENCODE_GO_MCP"); v != "1" && v != "true" {
+		return nil
+	}
+	cfg := config.Load(workdir)
+	if cfg.Raw == nil {
+		return nil
+	}
+	section, _ := cfg.Raw["mcp"].(map[string]any)
+	return section
+}

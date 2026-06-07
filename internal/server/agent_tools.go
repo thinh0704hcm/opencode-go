@@ -7,12 +7,22 @@ import (
 	"github.com/opencode-go/opencode-go/internal/tool"
 )
 
+// schemaer is implemented by tools (e.g. MCP adapters) that carry their own
+// provider schema; builtins fall back to the static schemaForTool table.
+type schemaer interface {
+	Schema() provider.ToolSchema
+}
+
 // toolSchemas maps every registered tool to a provider.ToolSchema the model can
 // see, attaching real descriptions and JSON-schema parameters for known tools.
 func toolSchemas(reg *tool.Registry) []provider.ToolSchema {
 	tools := reg.List()
 	schemas := make([]provider.ToolSchema, 0, len(tools))
 	for _, t := range tools {
+		if sc, ok := t.(schemaer); ok {
+			schemas = append(schemas, sc.Schema())
+			continue
+		}
 		schemas = append(schemas, schemaForTool(t.Name()))
 	}
 	return schemas
