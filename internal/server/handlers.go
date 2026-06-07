@@ -95,7 +95,8 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	s.publishUserMessage(id, userMsg)
 
 	// Run the generation in the background; return 204 immediately.
-	go s.runGeneration(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System)
+	agent, _ := resolveAgent(s.workdir, req.Agent)
+	go s.runGeneration(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System, agent)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -139,7 +140,8 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	s.publishUserMessage(id, userMsg)
 
 	// Block until the assistant turn completes, reusing the shared pipeline.
-	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System)
+	agent, _ := resolveAgent(s.workdir, req.Agent)
+	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System, agent)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

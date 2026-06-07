@@ -24,7 +24,7 @@ const permTimeout = 60 * time.Second
 // the assistant message + busy status beforehand and for finishGeneration +
 // session.idle afterward; this method ONLY performs the provider+tool iteration,
 // emitting text/reasoning deltas and tool parts.
-func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string, callerSystem string) string {
+func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string, callerSystem string, agent Agent) string {
 	messages := []provider.ChatMessage{{Role: "user", Content: joinTexts(texts)}}
 
 	sb, err := tool.New(s.workdir)
@@ -37,8 +37,8 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 		req := provider.ChatRequest{
 			Model:    modelID,
 			Messages: messages,
-			System:   combineSystem(buildSystemPrompt(s.workdir), callerSystem),
-			Tools:    toolSchemas(s.tools),
+			System:   combineSystem(buildSystemPrompt(s.workdir, agent.Prompt), callerSystem),
+			Tools:    toolSchemas(s.tools, agent.toolAllowed),
 		}
 
 		stream, err := s.provider.StreamChat(ctx, req)
@@ -99,6 +99,14 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID
 			_ = json.Unmarshal(call.Input, &toolInput)
 			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", toolInput, "")
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
+
+			if !agent.toolAllowed(call.Name) {
+				out := "tool not allowed for this agent: " + call.Name
+				p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)
+				s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+				messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
+				continue
+			}
 
 			if needsPermission(s.tools, call.Name) && !s.perms.IsAllowed(sessionID, call.Name) {
 				preq := s.perms.Ask("per_"+call.ID, sessionID, call.Name)

@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/opencode-go/opencode-go/internal/config"
@@ -67,12 +68,24 @@ type agentInfo struct {
 	Description string `json:"description"`
 }
 
-// handleAgent serves GET /agent: the default agent list. M2 returns the single
-// built-in "build" agent (config-driven agents fill in M4, architecture §7.2).
+// handleAgent serves GET /agent: the file-based agents loaded via loadAgents,
+// always including the default "build" agent first (architecture §7.2).
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []agentInfo{
-		{Name: "build", Description: "The default agent."},
-	})
+	out := []agentInfo{{Name: "build", Description: "The default agent."}}
+	agents := loadAgents(s.workdir)
+	names := make([]string, 0, len(agents))
+	for name := range agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		a := agents[name]
+		if a.Name == "build" {
+			continue // don't duplicate the default
+		}
+		out = append(out, agentInfo{Name: a.Name, Description: a.Description})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // secretValueRe flags string VALUES that are themselves secrets regardless of

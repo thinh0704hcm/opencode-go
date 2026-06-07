@@ -15,10 +15,13 @@ type schemaer interface {
 
 // toolSchemas maps every registered tool to a provider.ToolSchema the model can
 // see, attaching real descriptions and JSON-schema parameters for known tools.
-func toolSchemas(reg *tool.Registry) []provider.ToolSchema {
+func toolSchemas(reg *tool.Registry, allow func(string) bool) []provider.ToolSchema {
 	tools := reg.List()
 	schemas := make([]provider.ToolSchema, 0, len(tools))
 	for _, t := range tools {
+		if allow != nil && !allow(t.Name()) {
+			continue
+		}
 		if sc, ok := t.(schemaer); ok {
 			schemas = append(schemas, sc.Schema())
 			continue
