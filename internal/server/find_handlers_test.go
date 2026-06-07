@@ -72,3 +72,28 @@ func TestHandleFileRead(t *testing.T) {
 		t.Fatalf("traversal should not return 200")
 	}
 }
+
+func TestHandleFind(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello\nNEEDLE here\nbye"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("nothing"), 0o644)
+	s := newFindTestServer(t, dir)
+
+	req := httptest.NewRequest(http.MethodGet, "/find?pattern=NEEDLE", nil)
+	rr := httptest.NewRecorder()
+	s.handleFind(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status %d", rr.Code)
+	}
+	var got []findMatch
+	json.Unmarshal(rr.Body.Bytes(), &got)
+	if len(got) != 1 || got[0].Line != 2 || !strings.Contains(got[0].Text, "NEEDLE") {
+		t.Fatalf("want one hit at line 2, got %v", got)
+	}
+	// Missing pattern -> 400.
+	rr2 := httptest.NewRecorder()
+	s.handleFind(rr2, httptest.NewRequest(http.MethodGet, "/find", nil))
+	if rr2.Code != 400 {
+		t.Fatalf("missing pattern want 400 got %d", rr2.Code)
+	}
+}

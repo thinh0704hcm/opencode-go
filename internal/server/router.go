@@ -42,6 +42,7 @@ func (s *Server) routes() http.Handler {
 
 	// Read-only file search/read (real-server parity).
 	mux.HandleFunc("GET /find/file", s.handleFindFile)
+	mux.HandleFunc("GET /find", s.handleFind)
 	mux.HandleFunc("GET /file", s.handleFileRead)
 
 	// Permission reply: primary + fallback, both wired to one gate (§4.2/B2).
