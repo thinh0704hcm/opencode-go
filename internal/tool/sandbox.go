@@ -75,7 +75,16 @@ func (s *Sandbox) OpenFileNoFollow(rel string, flag int, perm os.FileMode) (*os.
 func (s *Sandbox) Resolve(rel string) (string, error) {
 	// 1. Reject absolute inputs or ".." elements that escape the root.
 	if filepath.IsAbs(rel) {
-		return "", fmt.Errorf("sandbox: absolute path not allowed: %q", rel)
+		// Be forgiving: if the absolute path is within the sandbox root, make it relative.
+		if strings.HasPrefix(filepath.Clean(rel), s.root+string(os.PathSeparator)) || filepath.Clean(rel) == s.root {
+			var err error
+			rel, err = filepath.Rel(s.root, rel)
+			if err != nil {
+				return "", fmt.Errorf("sandbox: absolute path not allowed: %q", rel)
+			}
+		} else {
+			return "", fmt.Errorf("sandbox: absolute path escapes root: %q", rel)
+		}
 	}
 	if escapesRoot(rel) {
 		return "", fmt.Errorf("sandbox: path escapes sandbox: %q", rel)
