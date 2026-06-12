@@ -19,10 +19,13 @@ const subBufSize = 1024
 // non-blocking send; guaranteed-delivery events block with a bounded timeout and
 // evict the subscriber on timeout.
 type Bus struct {
-	mu   sync.RWMutex
-	subs map[uint64]*Subscriber
-	seq  uint64
+	mu     sync.RWMutex
+	subs   map[uint64]*Subscriber
+	seq    uint64
+	recent []Event
 }
+
+const recentEvents = 2048
 
 // Subscriber is one SSE consumer. The data channel is bounded; dropped counts
 // deltas dropped under backpressure. The data channel (ch) is owned by the
@@ -50,10 +53,26 @@ func NewBus() *Bus {
 // directory filter (architecture §7.2 / B3): every subscriber receives every
 // event.
 func (b *Bus) Subscribe() (*Subscriber, func()) {
+	return b.SubscribeFiltered(func(Event) bool { return true })
+}
+
+// SubscribeFiltered registers a new subscriber and replays ONLY recent events
+// that match the filter.
+func (b *Bus) SubscribeFiltered(filter func(Event) bool) (*Subscriber, func()) {
 	b.mu.Lock()
 	b.seq++
 	id := b.seq
 	s := &Subscriber{id: id, ch: make(chan Event, subBufSize), done: make(chan struct{})}
+	for _, ev := range b.recent {
+		if filter == nil || filter(ev) {
+			select {
+			case s.ch <- ev:
+			default:
+				// Buffer full during replay: should not happen for a new subscriber
+				// given subBufSize >> recentEvents per session.
+			}
+		}
+	}
 	b.subs[id] = s
 	b.mu.Unlock()
 
@@ -87,6 +106,14 @@ func (s *Subscriber) Dropped() uint64 {
 // Publish fans out an event to all subscribers using the per-type delivery
 // policy (architecture §2.3).
 func (b *Bus) Publish(ev Event) {
+	guaranteed := ev.GuaranteedDelivery()
+	b.mu.Lock()
+	b.recent = append(b.recent, ev)
+	if len(b.recent) > recentEvents {
+		b.recent = b.recent[len(b.recent)-recentEvents:]
+	}
+	b.mu.Unlock()
+
 	// Snapshot subscribers under RLock so we don't hold the lock during a
 	// potentially blocking guaranteed-delivery send.
 	b.mu.RLock()
@@ -96,7 +123,6 @@ func (b *Bus) Publish(ev Event) {
 	}
 	b.mu.RUnlock()
 
-	guaranteed := ev.GuaranteedDelivery()
 	for _, s := range subs {
 		if guaranteed {
 			b.deliverGuaranteed(s, ev)
@@ -139,4 +165,13 @@ func (b *Bus) SubscriberCount() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.subs)
+}
+
+// ClearReplay drops buffered events for late subscribers. A new session starts a
+// fresh event timeline; without this, attached `opencode run` can replay an old
+// session.idle first and exit before seeing the current run's text.
+func (b *Bus) ClearReplay() {
+	b.mu.Lock()
+	b.recent = nil
+	b.mu.Unlock()
 }

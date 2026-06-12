@@ -2,6 +2,7 @@ package event
 
 import (
 	"sync/atomic"
+	"time"
 )
 
 // Event is the single canonical event type. The discriminator is Type;
@@ -31,6 +32,23 @@ const (
 	TypePermissionAsked    = "permission.asked"
 	TypePermissionUpdated  = "permission.updated"
 	TypePermissionReplied  = "permission.replied"
+
+	TypeSessionNextPrompted         = "session.next.prompted"
+	TypeSessionNextPromptAdmitted   = "session.next.prompt.admitted"
+	TypeSessionNextPromptPromoted   = "session.next.prompt.promoted"
+	TypeSessionNextStepStarted      = "session.next.step.started"
+	TypeSessionNextStepEnded        = "session.next.step.ended"
+	TypeSessionNextStepFailed       = "session.next.step.failed"
+	TypeSessionNextTextStarted      = "session.next.text.started"
+	TypeSessionNextTextDelta        = "session.next.text.delta"
+	TypeSessionNextTextEnded        = "session.next.text.ended"
+	TypeSessionNextToolInputStarted = "session.next.tool.input.started"
+	TypeSessionNextToolInputDelta   = "session.next.tool.input.delta"
+	TypeSessionNextToolInputEnded   = "session.next.tool.input.ended"
+	TypeSessionNextToolCalled       = "session.next.tool.called"
+	TypeSessionNextToolSuccess      = "session.next.tool.success"
+	TypeSessionNextToolFailed       = "session.next.tool.failed"
+	TypeSessionNextRetried          = "session.next.retried"
 )
 
 // PartDeltaProps is the properties shape for message.part.delta.
@@ -102,6 +120,11 @@ const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 func newID(prefix string) string {
 	n := idSeq.Add(1)
 	return prefix + "_" + base62(n)
+}
+
+// NewID exposes the package-internal newID.
+func NewID(prefix string) string {
+	return newID(prefix)
 }
 
 func base62(n uint64) string {
@@ -207,5 +230,406 @@ func (e Event) GuaranteedDelivery() bool {
 		return e.IsFinalAssistant() // only the completed assistant message
 	default:
 		return false // deltas + everything else are droppable
+	}
+}
+type SessionNextPromptProps struct {
+	Timestamp   int64  `json:"timestamp"`
+	SessionID   string `json:"sessionID"`
+	MessageID   string `json:"messageID"`
+	AdmittedSeq int64  `json:"admittedSeq"`
+	Prompt      struct {
+		Text string `json:"text"`
+	} `json:"prompt"`
+	Delivery string `json:"delivery"` // "steer" | "queue"
+}
+
+type SessionNextStepStartedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	Agent              string `json:"agent"`
+	Model              struct {
+		ID         string `json:"id"`
+		ProviderID string `json:"providerID"`
+	} `json:"model"`
+}
+
+type SessionNextStepEndedTokens struct {
+	Input     int64 `json:"input"`
+	Output    int64 `json:"output"`
+	Reasoning int64 `json:"reasoning"`
+	Cache     struct {
+		Read  int64 `json:"read"`
+		Write int64 `json:"write"`
+	} `json:"cache"`
+}
+
+type SessionNextStepEndedProps struct {
+	Timestamp          int64                      `json:"timestamp"`
+	SessionID          string                     `json:"sessionID"`
+	AssistantMessageID string                     `json:"assistantMessageID"`
+	Finish             string                     `json:"finish"`
+	Cost               float64                    `json:"cost"`
+	Tokens             SessionNextStepEndedTokens `json:"tokens"`
+}
+
+type SessionNextStepFailedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	Error              struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type SessionNextTextStartedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	TextID             string `json:"textID"`
+}
+
+type SessionNextTextDeltaProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	TextID             string `json:"textID"`
+	Delta              string `json:"delta"`
+}
+
+type SessionNextTextEndedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	TextID             string `json:"textID"`
+	Text               string `json:"text"`
+}
+
+type SessionNextToolInputStartedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	CallID             string `json:"callID"`
+	Name               string `json:"name"`
+}
+
+type SessionNextToolInputDeltaProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	CallID             string `json:"callID"`
+	Delta              string `json:"delta"`
+}
+
+type SessionNextToolInputEndedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	CallID             string `json:"callID"`
+	Text               string `json:"text"`
+}
+
+type SessionNextToolCalledProps struct {
+	Timestamp          int64          `json:"timestamp"`
+	SessionID          string         `json:"sessionID"`
+	AssistantMessageID string         `json:"assistantMessageID"`
+	CallID             string         `json:"callID"`
+	Tool               string         `json:"tool"`
+	Input              map[string]any `json:"input"`
+	Provider           struct {
+		Executed bool `json:"executed"`
+	} `json:"provider"`
+}
+
+type SessionNextToolSuccessProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	CallID             string `json:"callID"`
+	Content            []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Provider struct {
+		Executed bool `json:"executed"`
+	} `json:"provider"`
+}
+
+type SessionNextToolFailedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	CallID             string `json:"callID"`
+	Error              struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+	Provider struct {
+		Executed bool `json:"executed"`
+	} `json:"provider"`
+}
+
+type SessionNextRetriedProps struct {
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	Attempt   int    `json:"attempt"`
+	Error     struct {
+		Message     string `json:"message"`
+		IsRetryable bool   `json:"isRetryable"`
+	} `json:"error"`
+}
+
+func NewSessionNextPrompted(sessionID, messageID, text, delivery string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextPrompted,
+		Properties: SessionNextPromptProps{
+			Timestamp: time.Now().UnixMilli(),
+			SessionID: sessionID,
+			MessageID: messageID,
+			Prompt: struct {
+				Text string `json:"text"`
+			}{Text: text},
+			Delivery: delivery,
+		},
+	}
+}
+
+func NewSessionNextPromptAdmitted(sessionID, messageID, text, delivery string, seq int64) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextPromptAdmitted,
+		Properties: SessionNextPromptProps{
+			Timestamp:   time.Now().UnixMilli(),
+			SessionID:   sessionID,
+			MessageID:   messageID,
+			AdmittedSeq: seq,
+			Prompt: struct {
+				Text string `json:"text"`
+			}{Text: text},
+			Delivery: delivery,
+		},
+	}
+}
+
+func NewSessionNextPromptPromoted(sessionID, messageID, text string, timeCreated int64) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextPromptPromoted,
+		Properties: SessionNextPromptProps{
+			Timestamp: timeCreated,
+			SessionID: sessionID,
+			MessageID: messageID,
+			Prompt: struct {
+				Text string `json:"text"`
+			}{Text: text},
+			Delivery: "queue",
+		},
+	}
+}
+
+func NewSessionNextStepStarted(sessionID, assistantMsgID, agentName, modelID, providerID string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextStepStarted,
+		Properties: SessionNextStepStartedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			Agent:              agentName,
+			Model: struct {
+				ID         string `json:"id"`
+				ProviderID string `json:"providerID"`
+			}{ID: modelID, ProviderID: providerID},
+		},
+	}
+}
+
+func NewSessionNextStepEnded(sessionID, assistantMsgID, finish string, cost float64, tokens SessionNextStepEndedTokens) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextStepEnded,
+		Properties: SessionNextStepEndedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			Finish:             finish,
+			Cost:               cost,
+			Tokens:             tokens,
+		},
+	}
+}
+
+func NewSessionNextStepFailed(sessionID, assistantMsgID, errType, errMsg string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextStepFailed,
+		Properties: SessionNextStepFailedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			Error: struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			}{Type: errType, Message: errMsg},
+		},
+	}
+}
+
+func NewSessionNextTextStarted(sessionID, assistantMsgID, textID string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextTextStarted,
+		Properties: SessionNextTextStartedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			TextID:             textID,
+		},
+	}
+}
+
+func NewSessionNextTextDelta(sessionID, assistantMsgID, textID, delta string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextTextDelta,
+		Properties: SessionNextTextDeltaProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			TextID:             textID,
+			Delta:              delta,
+		},
+	}
+}
+
+func NewSessionNextTextEnded(sessionID, assistantMsgID, textID, text string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextTextEnded,
+		Properties: SessionNextTextEndedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			TextID:             textID,
+			Text:               text,
+		},
+	}
+}
+
+func NewSessionNextToolInputStarted(sessionID, assistantMsgID, callID, name string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextToolInputStarted,
+		Properties: SessionNextToolInputStartedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			CallID:             callID,
+			Name:               name,
+		},
+	}
+}
+
+func NewSessionNextToolInputDelta(sessionID, assistantMsgID, callID, delta string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextToolInputDelta,
+		Properties: SessionNextToolInputDeltaProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			CallID:             callID,
+			Delta:              delta,
+		},
+	}
+}
+
+func NewSessionNextToolInputEnded(sessionID, assistantMsgID, callID, text string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextToolInputEnded,
+		Properties: SessionNextToolInputEndedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			CallID:             callID,
+			Text:               text,
+		},
+	}
+}
+
+func NewSessionNextToolCalled(sessionID, assistantMsgID, callID, toolName string, input map[string]any) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextToolCalled,
+		Properties: SessionNextToolCalledProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			CallID:             callID,
+			Tool:               toolName,
+			Input:              input,
+			Provider: struct {
+				Executed bool `json:"executed"`
+			}{Executed: true},
+		},
+	}
+}
+
+func NewSessionNextToolSuccess(sessionID, assistantMsgID, callID, output string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextToolSuccess,
+		Properties: SessionNextToolSuccessProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			CallID:             callID,
+			Content: []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}{{Type: "text", Text: output}},
+			Provider: struct {
+				Executed bool `json:"executed"`
+			}{Executed: true},
+		},
+	}
+}
+
+func NewSessionNextToolFailed(sessionID, assistantMsgID, callID, errMsg string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextToolFailed,
+		Properties: SessionNextToolFailedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: assistantMsgID,
+			CallID:             callID,
+			Error: struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			}{Type: "tool_execution_error", Message: errMsg},
+			Provider: struct {
+				Executed bool `json:"executed"`
+			}{Executed: true},
+		},
+	}
+}
+
+func NewSessionNextRetried(sessionID string, attempt int, errMsg string, isRetryable bool) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextRetried,
+		Properties: SessionNextRetriedProps{
+			Timestamp: time.Now().UnixMilli(),
+			SessionID: sessionID,
+			Attempt:   attempt,
+			Error: struct {
+				Message     string `json:"message"`
+				IsRetryable bool   `json:"isRetryable"`
+			}{Message: errMsg, IsRetryable: isRetryable},
+		},
 	}
 }

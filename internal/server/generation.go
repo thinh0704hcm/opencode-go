@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
@@ -24,108 +25,118 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 	s.bus.Publish(event.NewPermissionReplied(sessionID, requestID, reply))
 }
 
-// runGeneration runs one assistant turn for a session and emits the locked
-// terminal-contract event sequence (architecture §2.4, Option A):
-//
-//	session.status{busy}
-//	-> message.updated(assistant, time.completed=null)
-//	-> message.part.delta (field text) AND message.part.updated (full snapshot)...
-//	-> message.updated(assistant, time.completed set)   [GUARANTEED]
-//	-> session.idle{sessionID}                          [GUARANTEED, synthetic]
-//
-// (message.updated(user) is published by the handler before this runs.)
-func (s *Server) runGeneration(sessionID, userMsgID, providerID, modelID string, texts []string, callerSystem string, agent Agent) {
-	s.runGenerationSync(sessionID, userMsgID, providerID, modelID, texts, callerSystem, agent)
-}
-
-// runGenerationSync runs the assistant turn inline (same pipeline and event
-// sequence as runGeneration) and returns the final assistant MessageWithParts
-// once the turn has completed. ok is false if the session/message could not be
-// resolved. The async path wraps this in a goroutine; the synchronous
-// POST /session/{id}/message handler blocks on it directly.
-func (s *Server) runGenerationSync(sessionID, userMsgID, providerID, modelID string, texts []string, callerSystem string, agent Agent) (session.MessageWithParts, bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.registerCancel(sessionID, cancel)
-	defer func() { s.clearCancel(sessionID); cancel() }()
-
-	// session.status{type:"busy"}
-	s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "busy"}))
-
-	// Assistant message (time.completed=null) + message.updated(assistant).
-	asst, ok := s.store.NewAssistantMessage(sessionID, userMsgID, providerID, modelID)
+// runGenerationSync runs the full generation pipeline (start turn, loop,
+// finish) and blocks until the assistant message is completed. It returns the
+// final {info, parts} for the assistant message.
+func (s *Server) runGenerationSync(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
+	// 1. Create the assistant message
+	asst, ok := s.store.NewAssistantMessage(sessionID, parentID, providerID, modelID, agent.Name, "chat")
 	if !ok {
-		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "session not found"}))
-		s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}))
-		s.bus.Publish(event.NewSessionIdle(sessionID))
 		return session.MessageWithParts{}, false
 	}
-	messageID := asst.Info.ID
+
+	// 2. Publish message.updated(assistant) so the TUI sees the empty bubble
 	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
 
-	// NewAssistantMessage seeds a step-start part (Parts[0]); stream it before
-	// any text so consumers see step-start -> text -> step-finish ordering.
-	if len(asst.Parts) > 0 {
-		s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
-	}
+	// 3. Run the agent loop
+	s.runAgentLoop(context.Background(), sessionID, asst.Info.ID, parentID, modelID, texts, images, system, agent)
 
-	finishReason := s.runAgentLoop(ctx, sessionID, messageID, modelID, texts, callerSystem, agent)
-
-	// If the turn was aborted/cancelled (ctx error), the abort handler
-	// (handleSessionAbort) owns the terminal session.status{idle} +
-	// session.idle publish. Record the step-finish reason as "aborted"
-	// (not a clean "stop") and finalize the message so it is not left
-	// dangling, but do NOT emit a second session.idle here.
-	aborted := ctx.Err() != nil
-	reason := finishReason
-	if reason == "" {
-		reason = "stop"
-	}
-	if aborted {
-		reason = "aborted"
-	}
-
-	// Append + publish the terminal step-finish part before the final
-	// message.updated, matching real opencode's part ordering.
-	// Compute real cost from the tokens recorded during the turn.
-	var stepTokens *session.Tokens
-	var stepCost float64
-	if info, ok := s.store.MessageInfo(sessionID, messageID); ok {
-		if info.Tokens != nil {
-			stepTokens = info.Tokens
-			stepCost = computeCost(info.ModelID, info.Tokens.Input, info.Tokens.Output)
-		}
-	}
-	if stepTokens == nil {
-		stepTokens = &session.Tokens{}
-	}
-	if sf, ok := s.store.AppendStepFinish(sessionID, messageID, reason, stepCost, stepTokens); ok {
-		s.bus.Publish(event.NewMessagePartUpdated(sessionID, sf, time.Now().UnixMilli()))
-	}
-
-	// Close out open assistant text parts (set Time.End) so the completed
-	// message carries both start and end on its text parts, matching real.
-	s.store.FinishTextParts(sessionID, messageID)
-
-	// Final assistant message.updated (time.completed set) -> GUARANTEED.
-	s.finishGeneration(sessionID, messageID)
-
-	if aborted {
-		// handleSessionAbort already published session.status{idle} +
-		// session.idle; emitting again would double the terminal event.
-		return s.finalAssistantMessage(sessionID, messageID)
-	}
-
-	// Synthetic terminal session.idle -> GUARANTEED.
-	s.bus.Publish(event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}))
-	s.bus.Publish(event.NewSessionIdle(sessionID))
-
-	return s.finalAssistantMessage(sessionID, messageID)
+	// 4. Final completion
+	s.finishGeneration(sessionID, asst.Info.ID)
+	return s.store.GetMessage(sessionID, asst.Info.ID)
 }
 
-// finalAssistantMessage returns a deep copy of the completed assistant
-// MessageWithParts for the synchronous response.
-func (s *Server) finalAssistantMessage(sessionID, messageID string) (session.MessageWithParts, bool) {
-	return s.store.GetMessage(sessionID, messageID)
+// runGenerationAsync runs the generation pipeline in a background goroutine,
+// publishing the full sequence of SSE events. It returns immediately.
+func (s *Server) runGenerationAsync(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) {
+	go func() {
+		s.runGenerationSync(sessionID, parentID, providerID, modelID, texts, images, system, agent)
+	}()
+}
+
+// startOrQueue adds a generation turn to the session's serial queue. If the
+// queue is currently empty, it starts the turn immediately. It returns the
+// admitted sequence number and true if admitted. It returns false if
+// delivery=="steer" and the session is already busy.
+func (s *Server) startOrQueue(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string) (int64, bool) {
+	s.sesMu.Lock()
+	defer s.sesMu.Unlock()
+
+	w := s.sesQueue[sessionID]
+	if w == nil {
+		w = &sessionWork{
+			sessionID: sessionID,
+			queue:     []*generationTask{},
+		}
+		s.sesQueue[sessionID] = w
+	}
+
+	if w.running && delivery == "steer" {
+		return 0, false
+	}
+
+	w.admitSeq++
+	seq := w.admitSeq
+
+	task := &generationTask{
+		parentID:   parentID,
+		providerID: providerID,
+		modelID:    modelID,
+		texts:      texts,
+		images:     images,
+		system:     system,
+		agent:      agent,
+	}
+
+	w.queue = append(w.queue, task)
+
+	if w.running {
+		return seq, true
+	}
+
+	w.running = true
+	go s.processQueue(w)
+	return seq, true
+}
+
+func (s *Server) processQueue(w *sessionWork) {
+	for {
+		s.sesMu.Lock()
+		if len(w.queue) == 0 {
+			w.running = false
+			s.sesMu.Unlock()
+			// Publish idle events so the TUI knows we're done
+			s.bus.Publish(event.NewSessionStatus(w.sessionID, map[string]string{"type": "idle"}))
+			s.bus.Publish(event.NewSessionIdle(w.sessionID))
+			return
+		}
+
+		task := w.queue[0]
+		w.queue = w.queue[1:]
+		s.sesMu.Unlock()
+
+		// Publish busy status
+		s.bus.Publish(event.NewSessionStatus(w.sessionID, map[string]string{"type": "busy"}))
+
+		s.runGenerationSync(w.sessionID, task.parentID, task.providerID, task.modelID, task.texts, task.images, task.system, task.agent)
+	}
+}
+
+type generationTask struct {
+	parentID   string
+	providerID string
+	modelID    string
+	texts      []string
+	images     []string
+	system     string
+	agent      Agent
+}
+
+type sessionWork struct {
+	sessionID string
+	running   bool
+	admitSeq  int64
+	queue     []*generationTask
 }
 
 // emitDelta appends the delta to the store and publishes BOTH the droppable
@@ -150,14 +161,17 @@ func (s *Server) finishGeneration(sessionID, messageID string) {
 	s.store.PersistSession(sessionID)
 }
 
-// joinTexts concatenates prompt text parts with newlines.
-func joinTexts(texts []string) string {
-	out := ""
-	for i, t := range texts {
-		if i > 0 {
-			out += "\n"
+func firstLine(text string, maxLen int) string {
+	lines := strings.Split(text, "\n")
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
 		}
-		out += t
+		if len(l) > maxLen {
+			return l[:maxLen] + "…"
+		}
+		return l
 	}
-	return out
+	return ""
 }

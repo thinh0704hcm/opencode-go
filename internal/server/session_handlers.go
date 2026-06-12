@@ -18,10 +18,46 @@ func (s *Server) handleSessionTodo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []interface{}{})
 }
 
-// handleSessionDiff serves GET /session/{id}/diff. No diffs feature exists, so
-// it returns an empty JSON array (matches real opencode's empty case).
+// handleSessionDiff serves GET /session/{id}/diff. It returns the current git
+// diff stat (additions/deletions) for the workspace.
 func (s *Server) handleSessionDiff(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []interface{}{})
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	diff, err := gitDiffStat(s.workdir)
+	if err != nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	writeJSON(w, http.StatusOK, diff)
+}
+
+// handleSessionSummarize serves POST /session/{id}/summarize. It re-derives the
+// session title from the first user message text unconditionally and publishes
+// session.updated.
+func (s *Server) handleSessionSummarize(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if msgs, ok := s.store.Messages(id); ok {
+		for _, m := range msgs {
+			if m.Info.Role == "user" {
+				title := firstLine(partsText(m.Parts, "text"), 60)
+				if title != "" {
+					s.store.UpdateSessionTitle(id, title)
+					if updated, ok := s.store.GetSession(id); ok {
+						s.bus.Publish(event.NewSessionUpdated(id, updated))
+					}
+				}
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, true)
 }
 
 // handleSessionGet serves GET /session/{id}, returning the Session object.
@@ -76,6 +112,7 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	s.cancelSession(id) // abort any in-flight generation
 	if !s.store.Delete(id) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -123,4 +160,49 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, mwp)
+}
+
+// handleSessionNoop acknowledges SDK/TUI session actions that are not implemented
+// by opencode-go yet but should not break the 1.17.x client boot flow.
+func (s *Server) handleSessionNoop(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, true)
+}
+
+// handleSessionFork currently returns a new child session placeholder.
+func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	sess := s.store.CreateSession(id, "", directoryParam(r))
+	s.store.PersistSession(sess.ID)
+	writeJSON(w, http.StatusOK, sess)
+}
+
+func (s *Server) handleSessionShare(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"url": "", "share": false})
+}
+
+func (s *Server) handleSessionUnshare(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, true)
+}
+
+func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
+	s.handlePrompt(w, r)
 }

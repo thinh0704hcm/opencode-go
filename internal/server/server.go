@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -25,31 +26,36 @@ const Version = "1.16.0"
 
 // Server holds the runtime dependencies and HTTP lifecycle (architecture §2.1).
 type Server struct {
-	bus      *event.Bus
-	store    *session.Store
-	perms    *permission.Store
-	provider provider.Provider
-	model    string // default model id passed to the provider
-	logger   *slog.Logger
-	tools    *tool.Registry
-	mcp      *mcp.Manager
-	workdir  string
-	ptys     *pty.Registry
+	bus       *event.Bus
+	store     *session.Store
+	perms     *permission.Store
+	provider  provider.Provider
+	model     string // default model id passed to the provider
+	maxTokens int    // output-token budget sent as max_tokens (0 = omit)
+	logger    *slog.Logger
+	tools     *tool.Registry
+	mcp       *mcp.Manager
+	workdir   string
+	ptys      *pty.Registry
 
 	cancelMu sync.Mutex
 	cancels  map[string]context.CancelFunc
+
+	sesMu    sync.Mutex
+	sesQueue map[string]*sessionWork
 
 	http *http.Server
 }
 
 // Options configures a Server.
 type Options struct {
-	Provider provider.Provider
-	Model    string // default model id
-	Logger   *slog.Logger
-	Tools    *tool.Registry
-	Workdir  string
-	DataDir  string
+	Provider  provider.Provider
+	Model     string // default model id
+	MaxTokens int    // output-token budget (max_tokens); <1 means omit
+	Logger    *slog.Logger
+	Tools     *tool.Registry
+	Workdir   string
+	DataDir   string
 }
 
 // New builds a Server with its in-memory bus, store, and permission gate.
@@ -78,19 +84,31 @@ func New(opts Options) *Server {
 			logger.Error("session load failed", "err", err)
 		}
 	}
-	return &Server{
-		bus:      event.NewBus(),
-		store:    st,
-		perms:    permission.NewStore(),
-		provider: opts.Provider,
-		model:    opts.Model,
-		logger:   logger,
-		tools:    tools,
-		mcp:      mcpMgr,
-		workdir:  workdir,
-		ptys:     pty.NewRegistry(),
-		cancels:  map[string]context.CancelFunc{},
+	srv := &Server{
+		bus:   event.NewBus(),
+		store: st,
+		perms: permission.NewStoreWithPath(func() string {
+			if opts.DataDir != "" {
+				return filepath.Join(opts.DataDir, "permissions.json")
+			}
+			return ""
+		}()),
+		provider:  opts.Provider,
+		model:     opts.Model,
+		maxTokens: opts.MaxTokens,
+		logger:    logger,
+		tools:     tools,
+		mcp:       mcpMgr,
+		workdir:   workdir,
+		ptys:      pty.NewRegistry(),
+		cancels:   map[string]context.CancelFunc{},
+		sesQueue:  map[string]*sessionWork{},
 	}
+	srv.tools.Register(delegateTool{srv: srv})
+	srv.tools.Register(taskTool{srv: srv})
+	logger.Debug("tool registered", "name", "delegate")
+	logger.Debug("tool registered", "name", "task")
+	return srv
 }
 
 // Handler returns the HTTP handler (router) for the server.
@@ -142,11 +160,12 @@ func (s *Server) ListenAndServe(addr string) error {
 	return s.http.ListenAndServe()
 }
 
-// Shutdown gracefully stops the HTTP server.
+// Shutdown gracefully stops the HTTP server and flushes all sessions to disk.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.mcp != nil {
 		s.mcp.Shutdown()
 	}
+	s.store.PersistAll()
 	if s.http == nil {
 		return nil
 	}

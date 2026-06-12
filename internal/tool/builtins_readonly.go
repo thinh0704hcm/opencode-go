@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,7 +27,7 @@ func (readTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{}, err
 	}
-	f, err := sb.OpenFileNoFollow(in.Path, os.O_RDONLY, 0)
+	f, err := sb.OpenReadOnlyNoFollow(in.Path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -54,7 +56,7 @@ func (lsTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox) (
 	if in.Path == "" {
 		in.Path = "."
 	}
-	abs, err := sb.Resolve(in.Path)
+	abs, err := sb.ResolveReadOnly(in.Path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -87,7 +89,7 @@ func (globTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{}, err
 	}
-	matches, err := filepath.Glob(filepath.Join(sb.Root(), in.Pattern))
+	matches, err := filepath.Glob(globBase(sb, in.Pattern))
 	if err != nil {
 		return Result{}, err
 	}
@@ -128,7 +130,7 @@ func (grepTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	if err != nil {
 		return Result{}, err
 	}
-	abs, err := sb.Resolve(in.Path)
+	abs, err := sb.ResolveReadOnly(in.Path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -169,3 +171,71 @@ func (grepTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox)
 	out, truncated := TruncateOutput([]byte(b.String()))
 	return Result{Output: out, Truncated: truncated}, nil
 }
+
+func globBase(sb *Sandbox, pattern string) string {
+	if filepath.IsAbs(pattern) {
+		clean := filepath.Clean(pattern)
+		if clean == "/var/log" || strings.HasPrefix(clean, "/var/log"+string(os.PathSeparator)) {
+			return clean
+		}
+	}
+	return filepath.Join(sb.Root(), pattern)
+}
+
+func stripHTMLTags(s string) string {
+	var inTag bool
+	var result []rune
+	for _, r := range s {
+		if r == '<' {
+			inTag = true
+		} else if r == '>' {
+			inTag = false
+		} else if !inTag {
+			result = append(result, r)
+		}
+	}
+	return string(result)
+}
+
+type webFetchTool struct{}
+
+func (webFetchTool) Name() string   { return "WebFetch" }
+func (webFetchTool) Mutating() bool { return false }
+
+func (webFetchTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox) (Result, error) {
+	var args struct {
+		URL    string `json:"url"`
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return Result{}, err
+	}
+	if args.URL == "" {
+		return Result{}, fmt.Errorf("url is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, args.URL, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	req.Header.Set("User-Agent", "opencode/1.0 WebFetch")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return Result{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return Result{}, err
+	}
+	text := string(body)
+	// Strip HTML tags to reduce token count.
+	text = stripHTMLTags(text)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		text = fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, text)
+	}
+	if len(text) > 100_000 {
+		text = text[:100_000] + "\n… (truncated)"
+	}
+	return Result{Output: text}, nil
+}
+

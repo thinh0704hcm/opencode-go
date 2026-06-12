@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/session"
 )
 
@@ -31,7 +33,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var req sessionCreateRequest
 	_ = decodeBody(r, &req) // body {} accepted; ignore decode errors
 
-	dir := directoryOf(r)
+	s.bus.ClearReplay()
+
+	dir := directoryParam(r)
 	sess := s.store.CreateSession(req.ParentID, req.Title, dir)
 	s.store.PersistSession(sess.ID)
 	writeJSON(w, http.StatusOK, sess)
@@ -41,6 +45,8 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 type promptPart struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	Mime string `json:"mime,omitempty"`
+	URL  string `json:"url,omitempty"`
 }
 
 // promptModel is the model selector in the prompt body.
@@ -50,12 +56,52 @@ type promptModel struct {
 }
 
 // promptAsyncRequest is the POST /session/{id}/prompt_async body.
+type agentSelector string
+
+func (a *agentSelector) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*a = agentSelector(s)
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil
+	}
+	for _, key := range []string{"name", "id", "agent"} {
+		if v, ok := obj[key].(string); ok {
+			*a = agentSelector(v)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (a agentSelector) String() string { return string(a) }
+
 type promptAsyncRequest struct {
-	MessageID string       `json:"messageID"`
-	Model     promptModel  `json:"model"`
-	Agent     string       `json:"agent"`
-	Parts     []promptPart `json:"parts"`
-	System    string       `json:"system,omitempty"`
+	MessageID string        `json:"messageID"`
+	Model     promptModel   `json:"model"`
+	Agent     agentSelector `json:"agent"`
+	Mode      agentSelector `json:"mode"`
+	AgentID   agentSelector `json:"agentID"`
+	Parts     []promptPart  `json:"parts"`
+	System    string        `json:"system,omitempty"`
+}
+
+func (r promptAsyncRequest) AgentName() string {
+	// `mode` is often the opencode runtime mode ("build"), not the selected
+	// agent. Prefer explicit agent fields and only use mode when non-default.
+	for _, v := range []agentSelector{r.Agent, r.AgentID} {
+		if strings.TrimSpace(v.String()) != "" {
+			return v.String()
+		}
+	}
+	m := strings.TrimSpace(r.Mode.String())
+	if m != "" && m != "build" {
+		return m
+	}
+	return ""
 }
 
 // handlePromptAsync serves POST /session/{id}/prompt_async. Returns 204
@@ -74,9 +120,12 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	texts := make([]string, 0, len(req.Parts))
+	images := make([]string, 0, len(req.Parts))
 	for _, p := range req.Parts {
 		if p.Type == "text" {
 			texts = append(texts, p.Text)
+		} else if p.Type == "file" && strings.HasPrefix(p.Mime, "image/") && p.URL != "" {
+			images = append(images, p.URL)
 		}
 	}
 
@@ -85,18 +134,26 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 		modelID = s.model
 	}
 
+	agent, _ := resolveAgent(s.workdir, req.AgentName())
+	if agent.Name == "" {
+		agent.Name = "build"
+	}
+
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, texts)
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, agent.Name, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if updated, ok := s.store.GetSession(id); ok {
+		s.bus.Publish(event.NewSessionUpdated(id, updated))
+	}
 	s.publishUserMessage(id, userMsg)
 
-	// Run the generation in the background; return 204 immediately.
-	agent, _ := resolveAgent(s.workdir, req.Agent)
-	go s.runGeneration(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System, agent)
+	// Queue (or start immediately) the generation turn for this session so
+	// concurrent prompt_async calls execute sequentially, not in parallel.
+	s.startOrQueue(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent, "")
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -119,9 +176,12 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	texts := make([]string, 0, len(req.Parts))
+	images := make([]string, 0, len(req.Parts))
 	for _, p := range req.Parts {
 		if p.Type == "text" {
 			texts = append(texts, p.Text)
+		} else if p.Type == "file" && strings.HasPrefix(p.Mime, "image/") && p.URL != "" {
+			images = append(images, p.URL)
 		}
 	}
 
@@ -130,22 +190,32 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		modelID = s.model
 	}
 
+	agent, _ := resolveAgent(s.workdir, req.AgentName())
+	if agent.Name == "" {
+		agent.Name = "build"
+	}
+
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, texts)
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, agent.Name, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if updated, ok := s.store.GetSession(id); ok {
+		s.bus.Publish(event.NewSessionUpdated(id, updated))
 	}
 	s.publishUserMessage(id, userMsg)
 
 	// Block until the assistant turn completes, reusing the shared pipeline.
-	agent, _ := resolveAgent(s.workdir, req.Agent)
-	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, req.System, agent)
+	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "busy"}))
+	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
+	s.bus.Publish(event.NewSessionIdle(id))
 	writeJSON(w, http.StatusOK, asst)
 }
 

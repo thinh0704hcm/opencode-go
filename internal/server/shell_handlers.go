@@ -51,17 +51,20 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. User message carrying the command, published before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, "", providerID, modelID, []string{req.Command})
+	userMsg, ok := s.store.AppendUserMessage(id, "", providerID, modelID, "build", []string{req.Command})
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if updated, ok := s.store.GetSession(id); ok {
+		s.bus.Publish(event.NewSessionUpdated(id, updated))
 	}
 	s.publishUserMessage(id, userMsg)
 
 	// 2. Run synchronously (block), mirroring runGenerationSync's event order.
 	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "busy"}))
 
-	asst, ok := s.store.NewAssistantMessage(id, userMsg.Info.ID, providerID, modelID)
+	asst, ok := s.store.NewAssistantMessage(id, userMsg.Info.ID, providerID, modelID, "build", "build")
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
