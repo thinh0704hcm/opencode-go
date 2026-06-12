@@ -302,6 +302,7 @@ func (s *Server) handleV2SessionPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.bus.Publish(event.NewSessionNextPrompted(sessionID, msgID, req.Prompt.Text, delivery))
 	s.bus.Publish(event.NewSessionNextPromptAdmitted(sessionID, msgID, req.Prompt.Text, delivery, seq))
 
 	resp := sessionInputAdmitted{
@@ -491,7 +492,11 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 			"time":  map[string]any{"created": m.Info.Time.Created},
 			"text":  partsText(m.Parts, "text"),
 			"agent": m.Info.Agent,
-			"model": map[string]any{"providerID": providerID, "modelID": modelID},
+			"model": map[string]any{
+				"id":         providerID + "/" + modelID,
+				"providerID": providerID,
+				"modelID":    modelID,
+			},
 		}
 	}
 
@@ -501,6 +506,15 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 		case "text":
 			content = append(content, map[string]any{
 				"type": "text",
+				"id":   p.ID,
+				"text": p.Text,
+			})
+		case "reasoning":
+			if p.Text == "" {
+				continue
+			}
+			content = append(content, map[string]any{
+				"type": "reasoning",
 				"id":   p.ID,
 				"text": p.Text,
 			})
@@ -532,7 +546,11 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 		"type":    "assistant",
 		"time":    map[string]any{"created": m.Info.Time.Created, "completed": m.Info.Time.Completed},
 		"agent":   m.Info.Agent,
-		"model":   map[string]any{"providerID": m.Info.ProviderID, "modelID": m.Info.ModelID},
+		"model": map[string]any{
+			"id":         m.Info.ProviderID + "/" + m.Info.ModelID,
+			"providerID": m.Info.ProviderID,
+			"modelID":    m.Info.ModelID,
+		},
 		"content": content,
 		"finish":  m.Info.Finish,
 		"cost":    m.Info.Cost,
@@ -612,7 +630,7 @@ func (s *Server) handleV2ModelList(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			info := modelV2Info{
-				ID:         mid,
+				ID:         p.ID + "/" + mid,
 				ProviderID: p.ID,
 				Name:       mid,
 				Enabled:    true,
@@ -750,6 +768,9 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.writeEvent(w, flusher, event.NewServerConnected(), event.KindEvent, "") {
 		return
 	}
+	if sess, ok := s.store.GetSession(sessionID); ok {
+		s.writeEvent(w, flusher, event.NewSessionUpdated(sessionID, sess), event.KindEvent, "")
+	}
 	if msgs, ok := s.store.Messages(sessionID); ok {
 		for _, m := range msgs {
 			s.writeEvent(w, flusher, event.NewMessageUpdated(sessionID, m.Info, m.Info.Time.Completed != nil), event.KindEvent, "")
@@ -767,6 +788,20 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeEvent(w, flusher, event.NewSessionIdle(sessionID), event.KindEvent, "")
 	}
 	s.sesMu.Unlock()
+
+	for _, req := range s.perms.List() {
+		if req.SessionID == sessionID {
+			askObj := map[string]any{
+				"id":        req.ID,
+				"sessionID": sessionID,
+				"type":      req.Permission,
+				"tool":      req.Permission,
+				"pattern":   "",
+				"always":    []any{},
+			}
+			s.writeEvent(w, flusher, event.NewPermissionAsked(askObj), event.KindEvent, "")
+		}
+	}
 
 	sub, cancel := s.bus.SubscribeFiltered(func(ev event.Event) bool {
 		return eventSessionID(ev) == sessionID

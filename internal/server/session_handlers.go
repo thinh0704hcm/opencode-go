@@ -150,6 +150,7 @@ func (s *Server) handleSessionAbort(w http.ResponseWriter, r *http.Request) {
 	s.sesMu.Lock()
 	if work := s.sesQueue[id]; work != nil {
 		work.queue = work.queue[:0]
+		work.draining = true
 	}
 	s.sesMu.Unlock()
 

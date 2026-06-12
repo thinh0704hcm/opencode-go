@@ -36,6 +36,11 @@ func (s *Server) runGenerationSync(sessionID, parentID, providerID, modelID stri
 		cancel()
 	}()
 
+	return s.runGenerationSyncCtx(ctx, sessionID, parentID, providerID, modelID, texts, images, system, agent)
+}
+
+// runGenerationSyncCtx executes the core of runGenerationSync using a provided context.
+func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
 	// 1. Create the assistant message
 	asst, ok := s.store.NewAssistantMessage(sessionID, parentID, providerID, modelID, agent.Name, "chat")
 	if !ok {
@@ -109,7 +114,8 @@ func (s *Server) startOrQueue(sessionID, parentID, providerID, modelID string, t
 func (s *Server) processQueue(w *sessionWork) {
 	for {
 		s.sesMu.Lock()
-		if len(w.queue) == 0 {
+		if len(w.queue) == 0 || w.draining {
+			w.draining = false
 			w.running = false
 			s.sesMu.Unlock()
 			// Publish idle events so the TUI knows we're done
@@ -142,6 +148,7 @@ type generationTask struct {
 type sessionWork struct {
 	sessionID string
 	running   bool
+	draining  bool
 	admitSeq  int64
 	queue     []*generationTask
 }

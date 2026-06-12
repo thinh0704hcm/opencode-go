@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -157,6 +158,7 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"_tag": "ConflictError", "message": "session is busy", "resource": "session"})
 		return
 	}
+	s.bus.Publish(event.NewSessionNextPrompted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
 	s.bus.Publish(event.NewSessionNextPromptAdmitted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue", seq))
 
 	w.WriteHeader(http.StatusNoContent)
@@ -211,9 +213,12 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishUserMessage(id, userMsg)
 
-	// Block until the assistant turn completes, reusing the shared pipeline.
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerCancel(id, cancel)
+	defer func() { s.clearCancel(id); cancel() }()
+
 	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "busy"}))
-	asst, ok := s.runGenerationSync(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent)
+	asst, ok := s.runGenerationSyncCtx(ctx, id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

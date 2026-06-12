@@ -41,6 +41,19 @@ func (r *Registry) Lookup(name string) (Tool, bool) {
 	return t, ok
 }
 
+// Unregister removes all tools whose Name starts with the given prefix.
+func (r *Registry) Unregister(prefix string) {
+	for name := range r.tools {
+		// MCP tools are prefixed with "mcpServerName/". We check for an exact
+		// match if the prefix doesn't have a trailing slash, or a prefix match.
+		// To be safe, we'll just check strings.HasPrefix.
+		// Let's use the simplest check: if len(name) >= len(prefix) && name[:len(prefix)] == prefix
+		if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+			delete(r.tools, name)
+		}
+	}
+}
+
 // List returns the registered tools in stable order sorted by name.
 func (r *Registry) List() []Tool {
 	names := make([]string, 0, len(r.tools))
