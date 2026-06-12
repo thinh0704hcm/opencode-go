@@ -151,9 +151,13 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishUserMessage(id, userMsg)
 
-	// Queue (or start immediately) the generation turn for this session so
-	// concurrent prompt_async calls execute sequentially, not in parallel.
-	s.startOrQueue(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent, "")
+	seq, ok := s.startOrQueue(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent, "")
+	if !ok {
+		s.store.RemoveMessage(id, userMsg.Info.ID)
+		writeJSON(w, http.StatusConflict, map[string]any{"_tag": "ConflictError", "message": "session is busy", "resource": "session"})
+		return
+	}
+	s.bus.Publish(event.NewSessionNextPromptAdmitted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue", seq))
 
 	w.WriteHeader(http.StatusNoContent)
 }

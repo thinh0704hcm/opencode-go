@@ -65,24 +65,50 @@ type sessionV2Info struct {
 	} `json:"location"`
 }
 
-func (s *Server) handleV2SessionList(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if lStr := r.URL.Query().Get("limit"); lStr != "" {
-		if l, err := strconv.Atoi(lStr); err == nil {
-			limit = l
+func parseOffsetCursor(raw string, total int) int {
+	offset := 0
+	if raw != "" {
+		if b, err := base64.StdEncoding.DecodeString(raw); err == nil {
+			if n, err := strconv.Atoi(string(b)); err == nil {
+				offset = n
+			}
 		}
 	}
-	sessions := s.store.List()
-	total := len(sessions)
-	offset := 0
-	if cur := r.URL.Query().Get("cursor"); cur != "" {
-		if b, err := base64.StdEncoding.DecodeString(cur); err == nil {
-			offset, _ = strconv.Atoi(string(b))
-		}
+	if offset < 0 {
+		offset = 0
 	}
 	if offset > total {
 		offset = total
 	}
+	return offset
+}
+
+func parsePageLimit(r *http.Request) int {
+	limit := 50
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	return limit
+}
+
+func (s *Server) handleV2SessionList(w http.ResponseWriter, r *http.Request) {
+	limit := parsePageLimit(r)
+	sessions := s.store.List()
+
+	order := r.URL.Query().Get("order")
+	if order == "" {
+		order = "desc"
+	}
+	if order == "desc" {
+		for i, j := 0, len(sessions)-1; i < j; i, j = i+1, j-1 {
+			sessions[i], sessions[j] = sessions[j], sessions[i]
+		}
+	}
+
+	total := len(sessions)
+	offset := parseOffsetCursor(r.URL.Query().Get("cursor"), total)
 	end := offset + limit
 	if end > total {
 		end = total
@@ -147,8 +173,8 @@ func (s *Server) mapToV2Info(sess session.Session) sessionV2Info {
 }
 
 type v2CreateSessionRequest struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
 	Location struct {
 		Directory string `json:"directory"`
 	} `json:"location"`
@@ -188,6 +214,11 @@ type v2PromptRequest struct {
 			Mime string `json:"mime"`
 		} `json:"files"`
 	} `json:"prompt"`
+	Model *struct {
+		ProviderID string `json:"providerID"`
+		ModelID    string `json:"modelID"`
+	} `json:"model"`
+	Agent    string `json:"agent"`
 	Delivery string `json:"delivery"` // "steer" | "queue"; default "steer"
 	Resume   bool   `json:"resume"`
 }
@@ -239,13 +270,19 @@ func (s *Server) handleV2SessionPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve agent
-	agent, _ := resolveAgent(s.workdir, "") // Use default agent
+	agent, _ := resolveAgent(s.workdir, req.Agent)
 	if agent.Name == "" {
 		agent.Name = "build"
 	}
 
-	// Append user message
-	msg, ok := s.store.AppendUserMessage(sessionID, msgID, s.provider.ID(), s.model, agent.Name, texts)
+	providerID := s.provider.ID()
+	modelID := s.model
+	if req.Model != nil && req.Model.ModelID != "" {
+		providerID = req.Model.ProviderID
+		modelID = req.Model.ModelID
+	}
+
+	msg, ok := s.store.AppendUserMessage(sessionID, msgID, providerID, modelID, agent.Name, texts)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, sessionNotFoundError)
 		return
@@ -255,7 +292,7 @@ func (s *Server) handleV2SessionPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishUserMessage(sessionID, msg)
 
-	seq, ok := s.startOrQueue(sessionID, msgID, s.provider.ID(), s.model, texts, images, "", agent, delivery)
+	seq, ok := s.startOrQueue(sessionID, msgID, providerID, modelID, texts, images, "", agent, delivery)
 	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"_tag":     "ConflictError",
@@ -336,8 +373,20 @@ func eventSessionID(ev event.Event) string {
 	case event.SessionErrorProps:
 		return p.SessionID
 	case event.SessionDeletedProps:
-		if s, ok := p.Info.(session.Session); ok {
-			return s.ID
+		switch info := p.Info.(type) {
+		case session.Session:
+			return info.ID
+		case *session.Session:
+			if info != nil {
+				return info.ID
+			}
+		case map[string]any:
+			if sid, ok := info["id"].(string); ok {
+				return sid
+			}
+			if sid, ok := info["ID"].(string); ok {
+				return sid
+			}
 		}
 	case event.PermissionRepliedProps:
 		return p.SessionID
@@ -385,30 +434,17 @@ func (s *Server) handleV2SessionMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	limit := 50
-	if lStr := r.URL.Query().Get("limit"); lStr != "" {
-		if l, err := strconv.Atoi(lStr); err == nil {
-			limit = l
-		}
-	}
+	limit := parsePageLimit(r)
 	order := r.URL.Query().Get("order") // "asc" | "desc", default "asc"
 
 	total := len(msgs)
-	offset := 0
-	if cur := r.URL.Query().Get("cursor"); cur != "" {
-		if b, err := base64.StdEncoding.DecodeString(cur); err == nil {
-			offset, _ = strconv.Atoi(string(b))
-		}
-	}
-	if offset > total {
-		offset = total
-	}
+	offset := parseOffsetCursor(r.URL.Query().Get("cursor"), total)
 	end := offset + limit
 	if end > total {
 		end = total
 	}
 
-	var data []any
+	data := make([]any, 0, end-offset)
 	if order == "desc" {
 		start := total - end
 		if start < 0 {
@@ -483,6 +519,11 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 				"name":  p.Tool,
 				"state": state,
 			})
+		case "step-start", "step-finish":
+			content = append(content, map[string]any{
+				"type": p.Type,
+				"id":   p.ID,
+			})
 		}
 	}
 
@@ -537,10 +578,10 @@ func (s *Server) handleV2AgentList(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelV2Info struct {
-	ID         string `json:"id"`
-	ProviderID string `json:"providerID"`
-	Name       string `json:"name"`
-	Enabled    bool   `json:"enabled"`
+	ID           string `json:"id"`
+	ProviderID   string `json:"providerID"`
+	Name         string `json:"name"`
+	Enabled      bool   `json:"enabled"`
 	Capabilities struct {
 		Tools  bool     `json:"tools"`
 		Input  []string `json:"input"`
@@ -705,14 +746,32 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
+	// Synthesise state-restore events from persisted store before joining live stream.
+	if !s.writeEvent(w, flusher, event.NewServerConnected(), event.KindEvent, "") {
+		return
+	}
+	if msgs, ok := s.store.Messages(sessionID); ok {
+		for _, m := range msgs {
+			s.writeEvent(w, flusher, event.NewMessageUpdated(sessionID, m.Info, m.Info.Time.Completed != nil), event.KindEvent, "")
+			for _, p := range m.Parts {
+				s.writeEvent(w, flusher, event.NewMessagePartUpdated(sessionID, p, 0), event.KindEvent, "") // 0 time to let TUI know it's historical
+			}
+		}
+	}
+	s.sesMu.Lock()
+	work := s.sesQueue[sessionID]
+	if work != nil && work.running {
+		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "busy"}), event.KindEvent, "")
+	} else {
+		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}), event.KindEvent, "")
+		s.writeEvent(w, flusher, event.NewSessionIdle(sessionID), event.KindEvent, "")
+	}
+	s.sesMu.Unlock()
+
 	sub, cancel := s.bus.SubscribeFiltered(func(ev event.Event) bool {
 		return eventSessionID(ev) == sessionID
 	})
 	defer cancel()
-
-	if !s.writeEvent(w, flusher, event.NewServerConnected(), event.KindEvent, "") {
-		return
-	}
 
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()

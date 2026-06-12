@@ -31,19 +31,30 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /session/{id}/children", s.handleSessionChildren)
 	mux.HandleFunc("GET /session/{id}/todo", s.handleSessionTodo)
 	mux.HandleFunc("GET /session/{id}/diff", s.handleSessionDiff)
+	mux.HandleFunc("POST /session/{id}/init", s.handleSessionNoop)
+	mux.HandleFunc("POST /session/{id}/fork", s.handleSessionFork)
 	mux.HandleFunc("POST /session/{id}/abort", s.handleSessionAbort)
+	mux.HandleFunc("POST /session/{id}/share", s.handleSessionShare)
+	mux.HandleFunc("DELETE /session/{id}/share", s.handleSessionUnshare)
+	mux.HandleFunc("POST /session/{id}/summarize", s.handleSessionSummarize)
 
 	// Prompt (async) + messages.
 	mux.HandleFunc("POST /session/{id}/prompt_async", s.handlePromptAsync)
 	mux.HandleFunc("POST /session/{id}/message", s.handlePrompt)
+	mux.HandleFunc("POST /session/{id}/command", s.handleSessionCommand)
 	mux.HandleFunc("POST /session/{id}/shell", s.handleSessionShell)
+	mux.HandleFunc("POST /session/{id}/revert", s.handleSessionRevert)
+	mux.HandleFunc("POST /session/{id}/unrevert", s.handleSessionUnrevert)
 	mux.HandleFunc("GET /session/{id}/message", s.handleGetMessages)
 	mux.HandleFunc("GET /session/{id}/message/{messageID}", s.handleGetMessage)
 
 	// Read-only file search/read (real-server parity).
 	mux.HandleFunc("GET /find/file", s.handleFindFile)
 	mux.HandleFunc("GET /find", s.handleFind)
+	mux.HandleFunc("GET /find/symbol", s.handleFindSymbol)
 	mux.HandleFunc("GET /file", s.handleFileRead)
+	mux.HandleFunc("GET /file/content", s.handleFileRead)
+	mux.HandleFunc("GET /file/status", s.handleFileStatus)
 
 	// Permission reply: primary + fallback, both wired to one gate (§4.2/B2).
 	mux.HandleFunc("POST /permission/{requestID}/reply", s.handlePermissionReply)
@@ -57,9 +68,14 @@ func (s *Server) routes() http.Handler {
 
 	// M2 sub2 boot stubs: populated stubs.
 	mux.HandleFunc("GET /path", s.handlePath)
+	mux.HandleFunc("GET /project", s.handleProjectList)
 	mux.HandleFunc("GET /project/current", s.handleProjectCurrent)
+	mux.HandleFunc("POST /provider/{id}/oauth/authorize", s.handleProviderOAuthNoop)
+	mux.HandleFunc("POST /provider/{id}/oauth/callback", s.handleProviderOAuthNoop)
 	mux.HandleFunc("GET /provider/auth", s.handleProviderAuth)
 	mux.HandleFunc("GET /experimental/console", s.handleExperimentalConsole)
+	mux.HandleFunc("GET /experimental/tool/ids", s.handleExperimentalToolIDs)
+	mux.HandleFunc("GET /experimental/tool", s.handleExperimentalTool)
 
 	// M2 sub2 boot stubs: empty/exact-shape stubs.
 	mux.HandleFunc("GET /command", s.handleCommand)
@@ -94,12 +110,42 @@ func (s *Server) routes() http.Handler {
 
 	// TUI control long-poll + log sink.
 	mux.HandleFunc("GET /tui/control/next", s.handleTUIControlNext)
+	mux.HandleFunc("POST /tui/control/response", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/append-prompt", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/open-help", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/open-sessions", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/open-themes", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/open-models", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/submit-prompt", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/clear-prompt", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/execute-command", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/show-toast", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/publish", s.handleTUIPublish)
+	mux.HandleFunc("POST /instance/dispose", s.handleTUIOK)
 	mux.HandleFunc("POST /log", s.handleLog)
+
+	// v2 API
+	mux.HandleFunc("GET /api/health", s.handleV2Health)
+	mux.HandleFunc("GET /api/location", s.handleV2Location)
+	mux.HandleFunc("GET /api/agent", s.handleV2AgentList)
+	mux.HandleFunc("GET /api/model", s.handleV2ModelList)
+	mux.HandleFunc("GET /api/provider", s.handleV2ProviderList)
+	mux.HandleFunc("GET /api/provider/{providerID}", s.handleV2ProviderGet)
+	mux.HandleFunc("GET /api/session", s.handleV2SessionList)
+	mux.HandleFunc("POST /api/session", s.handleV2SessionCreate)
+	mux.HandleFunc("GET /api/session/{sessionID}", s.handleV2SessionGet)
+	mux.HandleFunc("POST /api/session/{sessionID}/prompt", s.handleV2SessionPrompt)
+	mux.HandleFunc("GET /api/session/{sessionID}/wait", s.handleV2SessionWait)
+	mux.HandleFunc("GET /api/session/{sessionID}/message", s.handleV2SessionMessages)
+	mux.HandleFunc("GET /api/session/{sessionID}/event", s.handleV2SessionEvent)
 
 	return s.loggingMiddleware(mux)
 }
 
 // directoryOf extracts the optional ?directory=<cwd> query param.
 func directoryOf(r *http.Request) string {
-	return r.URL.Query().Get("directory")
+	if dir := r.URL.Query().Get("directory"); dir != "" {
+		return dir
+	}
+	return r.URL.Query().Get("path")
 }

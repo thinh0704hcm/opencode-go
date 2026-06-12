@@ -29,6 +29,13 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 // finish) and blocks until the assistant message is completed. It returns the
 // final {info, parts} for the assistant message.
 func (s *Server) runGenerationSync(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerCancel(sessionID, cancel)
+	defer func() {
+		s.clearCancel(sessionID)
+		cancel()
+	}()
+
 	// 1. Create the assistant message
 	asst, ok := s.store.NewAssistantMessage(sessionID, parentID, providerID, modelID, agent.Name, "chat")
 	if !ok {
@@ -39,7 +46,7 @@ func (s *Server) runGenerationSync(sessionID, parentID, providerID, modelID stri
 	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
 
 	// 3. Run the agent loop
-	s.runAgentLoop(context.Background(), sessionID, asst.Info.ID, parentID, modelID, texts, images, system, agent)
+	s.runAgentLoop(ctx, sessionID, asst.Info.ID, parentID, modelID, texts, images, system, agent)
 
 	// 4. Final completion
 	s.finishGeneration(sessionID, asst.Info.ID)

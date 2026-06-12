@@ -2,6 +2,8 @@ package server
 
 import (
 	"net/http"
+	"os/exec"
+	"strings"
 
 	"github.com/opencode-go/opencode-go/internal/event"
 )
@@ -133,19 +135,25 @@ func (s *Server) handleSessionChildren(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []interface{}{})
 }
 
-// handleSessionAbort serves POST /session/{id}/abort. It cancels the in-flight
-// generation turn (if any) via the per-session cancel registry and publishes
-// session.status{idle} + session.idle{sessionID} so the TUI clears its busy
-// state, then returns true.
+// handleSessionAbort serves POST /session/{id}/abort. It drains any pending
+// generation tasks and cancels the currently in-flight turn via the per-session
+// cancel registry. The processQueue loop will naturally emit idle events when
+// it finds the queue empty.
 func (s *Server) handleSessionAbort(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := s.store.GetSession(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+
+	// Drain queue first so no more items start after the cancel.
+	s.sesMu.Lock()
+	if work := s.sesQueue[id]; work != nil {
+		work.queue = work.queue[:0]
+	}
+	s.sesMu.Unlock()
+
 	s.cancelSession(id)
-	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
-	s.bus.Publish(event.NewSessionIdle(id))
 	writeJSON(w, http.StatusOK, true)
 }
 
@@ -162,6 +170,46 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mwp)
 }
 
+// handleSessionRevert stashes uncommitted changes for the session's working directory.
+func (s *Server) handleSessionRevert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.store.GetSession(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	dir := sess.Directory
+	if dir == "" {
+		dir = s.workdir
+	}
+	out, err := exec.CommandContext(r.Context(), "git", "-C", dir, "stash", "push", "-u", "--message", "opencode-revert-"+id).CombinedOutput()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, strings.TrimSpace(string(out)))
+		return
+	}
+	writeJSON(w, http.StatusOK, true)
+}
+
+// handleSessionUnrevert pops the stash created by revert.
+func (s *Server) handleSessionUnrevert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.store.GetSession(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	dir := sess.Directory
+	if dir == "" {
+		dir = s.workdir
+	}
+	out, err := exec.CommandContext(r.Context(), "git", "-C", dir, "stash", "pop").CombinedOutput()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, strings.TrimSpace(string(out)))
+		return
+	}
+	writeJSON(w, http.StatusOK, true)
+}
+
 // handleSessionNoop acknowledges SDK/TUI session actions that are not implemented
 // by opencode-go yet but should not break the 1.17.x client boot flow.
 func (s *Server) handleSessionNoop(w http.ResponseWriter, r *http.Request) {
@@ -176,13 +224,21 @@ func (s *Server) handleSessionNoop(w http.ResponseWriter, r *http.Request) {
 // handleSessionFork currently returns a new child session placeholder.
 func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, ok := s.store.GetSession(id); !ok {
+	parent, ok := s.store.GetSession(id)
+	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	sess := s.store.CreateSession(id, "", directoryParam(r))
-	s.store.PersistSession(sess.ID)
-	writeJSON(w, http.StatusOK, sess)
+
+	child := s.store.CreateSession(id, parent.Title+" (fork)", parent.Directory)
+	// Copy messages from parent into child
+	if msgs, ok := s.store.Messages(id); ok {
+		for _, m := range msgs {
+			s.store.CopyMessage(child.ID, m)
+		}
+	}
+	s.store.PersistSession(child.ID)
+	writeJSON(w, http.StatusOK, child)
 }
 
 func (s *Server) handleSessionShare(w http.ResponseWriter, r *http.Request) {

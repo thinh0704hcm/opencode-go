@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,11 +100,33 @@ func NewStore() *Store {
 	}
 }
 
+func sessionTitleFromTexts(texts []string) string {
+	joined := strings.TrimSpace(strings.Join(texts, " "))
+	joined = strings.Join(strings.Fields(joined), " ")
+	if joined == "" {
+		return "New session"
+	}
+	r := []rune(joined)
+	if len(r) > 60 {
+		return string(r[:60]) + "…"
+	}
+	return joined
+}
+
 // CreateSession creates a new session with a ses_ id (architecture §2.4).
 func (s *Store) CreateSession(parentID, title, directory string) Session {
+	return s.CreateSessionWithID("", parentID, title, directory)
+}
+
+// CreateSessionWithID behaves like CreateSession but uses the caller-supplied id
+// when non-empty, falling back to a generated ID otherwise.
+func (s *Store) CreateSessionWithID(id, parentID, title, directory string) Session {
 	now := nowMS()
+	if id == "" {
+		id = NewID("ses")
+	}
 	sess := &Session{
-		ID:        NewID("ses"),
+		ID:        id,
 		ParentID:  parentID,
 		Title:     title,
 		Directory: directory,
@@ -114,6 +137,39 @@ func (s *Store) CreateSession(parentID, title, directory string) Session {
 	s.messages[sess.ID] = nil
 	s.mu.Unlock()
 	return *sess
+}
+
+// DropTextAndReasoningParts removes all text and reasoning parts from an
+// assistant message. Called before a stream retry so partial content from the
+// failed attempt doesn't duplicate in the next attempt.
+func (s *Store) DropTextAndReasoningParts(sessionID, messageID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return
+	}
+	kept := mwp.Parts[:0]
+	for _, p := range mwp.Parts {
+		if p.Type != "text" && p.Type != "reasoning" {
+			kept = append(kept, p)
+		}
+	}
+	mwp.Parts = kept
+}
+
+// PersistAll persists every session to disk. Called at graceful shutdown so no
+// conversation data is lost on restart.
+func (s *Store) PersistAll() {
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	s.mu.RUnlock()
+	for _, id := range ids {
+		s.PersistSession(id)
+	}
 }
 
 // List returns a snapshot copy of all sessions sorted by Time.Created
@@ -156,7 +212,21 @@ func (s *Store) UpdateTitle(id string, title *string) (Session, bool) {
 		sess.Title = *title
 	}
 	sess.Time.Updated = nowMS()
+	s.sessions[id] = sess
 	return *sess, true
+}
+
+func (s *Store) UpdateSessionTitle(id, title string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return false
+	}
+	sess.Title = title
+	sess.Time.Updated = nowMS()
+	s.sessions[id] = sess
+	return true
 }
 
 // Delete removes a session and its messages. Returns whether it existed.
@@ -185,10 +255,13 @@ func (s *Store) GetMessage(sessionID, messageID string) (MessageWithParts, bool)
 
 // AppendUserMessage appends a user message built from the prompt text parts and
 // returns a copy of the stored MessageWithParts.
-func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID string, texts []string) (MessageWithParts, bool) {
+func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID, agentName string, texts []string) (MessageWithParts, bool) {
 	now := nextMS()
 	if messageID == "" {
 		messageID = NewID("msg")
+	}
+	if agentName == "" {
+		agentName = "build"
 	}
 	mwp := &MessageWithParts{
 		Info: Message{
@@ -196,7 +269,7 @@ func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID stri
 			Role:      "user",
 			SessionID: sessionID,
 			Time:      Time{Created: now},
-			Agent:     "build",
+			Agent:     agentName,
 			Summary:   &MsgSummary{Diffs: []any{}},
 		},
 	}
@@ -219,24 +292,51 @@ func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID stri
 		return MessageWithParts{}, false
 	}
 	s.messages[sessionID] = append(s.messages[sessionID], mwp)
+	if sess := s.sessions[sessionID]; sess != nil && strings.TrimSpace(sess.Title) == "" {
+		sess.Title = sessionTitleFromTexts(texts)
+		sess.Time.Updated = nowMS()
+	}
 	return copyMessage(mwp), true
+}
+
+// RemoveMessage removes a message and its parts from a session.
+func (s *Store) RemoveMessage(sessionID, messageID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, ok := s.messages[sessionID]
+	if !ok {
+		return false
+	}
+	for i, m := range msgs {
+		if m.Info.ID == messageID {
+			s.messages[sessionID] = append(msgs[:i], msgs[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // NewAssistantMessage creates an assistant message (time.completed=null) and
 // appends it. Returns a copy.
-func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID string) (MessageWithParts, bool) {
+func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, agentName, mode string) (MessageWithParts, bool) {
 	now := nextMS()
+	if agentName == "" {
+		agentName = "build"
+	}
+	if mode == "" {
+		mode = "build"
+	}
 	mwp := &MessageWithParts{
 		Info: Message{
 			ID:         NewID("msg"),
 			Role:       "assistant",
 			SessionID:  sessionID,
 			Time:       Time{Created: now, Completed: nil},
-			Agent:      "build",
+			Agent:      agentName,
 			ParentID:   parentID,
 			ProviderID: providerID,
 			ModelID:    modelID,
-			Mode:       "build",
+			Mode:       mode,
 			Finish:     "stop",
 			// Non-nil so the TUI can read tokens.output without dereferencing nil.
 			Tokens: &Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: TokenCache{Read: 0, Write: 0}},
@@ -258,6 +358,26 @@ func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID str
 	}
 	s.messages[sessionID] = append(s.messages[sessionID], mwp)
 	return copyMessage(mwp), true
+}
+
+// CopyMessage deep-copies a message and its parts into a target session with new IDs.
+func (s *Store) CopyMessage(targetSessionID string, m MessageWithParts) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	if _, ok := s.sessions[targetSessionID]; !ok {
+		return
+	}
+
+	newMsg := copyMessage(&m)
+	newMsg.Info.ID = NewID("msg")
+	newMsg.Info.SessionID = targetSessionID
+	for i := range newMsg.Parts {
+		newMsg.Parts[i].ID = NewID("prt")
+		newMsg.Parts[i].MessageID = newMsg.Info.ID
+		newMsg.Parts[i].SessionID = targetSessionID
+	}
+	s.messages[targetSessionID] = append(s.messages[targetSessionID], &newMsg)
 }
 
 // AppendTextDelta appends delta text to the assistant message's text part,
@@ -297,6 +417,28 @@ func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part
 	return copyPart(*p), true
 }
 
+func toolDisplay(toolName string, input map[string]any, output string) (string, map[string]any) {
+	title := ""
+	desc := ""
+	if toolName == "task" || toolName == "delegate" {
+		agent := "general"
+		if input != nil {
+			if v, ok := input["agent"].(string); ok && strings.TrimSpace(v) != "" {
+				agent = strings.TrimSpace(v)
+			}
+			if v, ok := input["description"].(string); ok && strings.TrimSpace(v) != "" {
+				desc = strings.TrimSpace(v)
+			} else if v, ok := input["prompt"].(string); ok && strings.TrimSpace(v) != "" {
+				desc = strings.TrimSpace(v)
+			}
+		}
+		title = agent + " " + toolName
+	} else {
+		title = toolName
+	}
+	return title, map[string]any{"output": output, "description": desc}
+}
+
 // AppendToolPart records a tool-activity part on the assistant message so the
 // agent loop can surface tool calls. Returns a copy of the new part and whether
 // the message was found.
@@ -308,10 +450,12 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 		return Part{}, false
 	}
 	now := nextMS()
-	end := int64(0)
+	var end *int64
 	if status == "completed" || status == "error" {
-		end = now
+		v := now + 1
+		end = &v
 	}
+	title, metadata := toolDisplay(toolName, input, output)
 	// Upsert by callID: the agent loop calls this twice per tool ("running"
 	// then "completed"/"error"). Update the same part in place so the TUI sees
 	// one part transition rather than an orphaned spinner. Empty callID always
@@ -333,8 +477,13 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 				ep.State.Input = input
 			}
 			ep.State.Output = output
-			ep.State.Metadata = map[string]any{"output": output, "description": ""}
-			if end != 0 {
+			ep.State.Title = title
+			ep.State.Metadata = metadata
+			if end != nil {
+				if ep.State.Time != nil && *end <= ep.State.Time.Start {
+					v := ep.State.Time.Start + 1
+					end = &v
+				}
 				ep.State.Time.End = end
 			}
 			return copyPart(*ep), true
@@ -351,8 +500,8 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 			Status:   status,
 			Input:    input,
 			Output:   output,
-			Title:    "",
-			Metadata: map[string]any{"output": output, "description": ""},
+			Title:    title,
+			Metadata: metadata,
 			Time:     &PartStateTime{Start: now, End: end},
 		},
 	})
@@ -415,24 +564,27 @@ func (s *Store) CompleteAssistantMessage(sessionID, messageID string) (Message, 
 	return mwp.Info, true
 }
 
-// FinishTextParts closes out any open assistant text parts by setting Time.End
-// for each "text" part that has a start time but no end yet. Real opencode's
-// completed assistant text parts carry both start and end timestamps; this
-// matches that shape when the turn finishes. No-op if the message is missing.
-func (s *Store) FinishTextParts(sessionID, messageID string) {
+// FinishOpenParts closes assistant streaming parts by setting Time.End. Both
+// text and reasoning parts must be closed; otherwise the attach TUI keeps the
+// turn in a perpetual "Thinking" state even after the assistant message is
+// completed. Returns updated part snapshots so callers can publish them.
+func (s *Store) FinishOpenParts(sessionID, messageID string) []Part {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mwp := s.findMessageLocked(sessionID, messageID)
 	if mwp == nil {
-		return
+		return nil
 	}
+	updated := []Part{}
 	for i := range mwp.Parts {
 		p := &mwp.Parts[i]
-		if p.Type == "text" && p.Time != nil && p.Time.End == nil {
+		if (p.Type == "text" || p.Type == "reasoning") && p.Time != nil && p.Time.End == nil {
 			end := nextMS()
 			p.Time.End = &end
+			updated = append(updated, copyPart(*p))
 		}
 	}
+	return updated
 }
 
 // MessageInfo returns a copy of a message's info block.

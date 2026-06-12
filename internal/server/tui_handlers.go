@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"github.com/opencode-go/opencode-go/internal/event"
 )
 
 // tuiControlNextTimeout bounds the GET /tui/control/next long-poll. On timeout
@@ -30,5 +31,22 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 	}
 	s.logger.Debug("tui log received")
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (s *Server) handleTUIPublish(w http.ResponseWriter, r *http.Request) {
+	var ev event.Event
+	if err := decodeBody(r, &ev); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid event payload")
+		return
+	}
+	s.bus.Publish(ev)
+	writeJSON(w, http.StatusOK, true)
+}
+
+func (s *Server) handleTUIOK(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		_, _ = io.Copy(io.Discard, r.Body)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
