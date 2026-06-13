@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -523,11 +524,19 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 	for _, p := range m.Parts {
 		switch p.Type {
 		case "text":
-			content = append(content, map[string]any{
+			tp := map[string]any{
 				"type": "text",
 				"id":   p.ID,
 				"text": p.Text,
-			})
+			}
+			if p.Time != nil {
+				var endMS any
+				if p.Time.End != nil {
+					endMS = *p.Time.End
+				}
+				tp["time"] = map[string]any{"start": p.Time.Start, "end": endMS}
+			}
+			content = append(content, tp)
 		case "reasoning":
 			if p.Text == "" {
 				continue
@@ -1006,11 +1015,27 @@ func (s *Server) handleV2SessionPermissionReply(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"data": true})
 }
 
+func (s *Server) resolveWorkdirPath(rawPath string) (string, error) {
+	if rawPath == "" {
+		return s.workdir, nil
+	}
+	abs := rawPath
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(s.workdir, abs)
+	}
+	clean := filepath.Clean(abs)
+	if clean != s.workdir && !strings.HasPrefix(clean, s.workdir+string(filepath.Separator)) {
+		return "", fmt.Errorf("path outside workdir")
+	}
+	return clean, nil
+}
+
 // handleV2FSList serves GET /api/fs/list — lists directory contents.
 func (s *Server) handleV2FSList(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		path = s.workdir
+	path, err := s.resolveWorkdirPath(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -1029,9 +1054,14 @@ func (s *Server) handleV2FSList(w http.ResponseWriter, r *http.Request) {
 
 // handleV2FSRead serves GET /api/fs/read — reads a file.
 func (s *Server) handleV2FSRead(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
+	raw := r.URL.Query().Get("path")
+	if raw == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"data": ""})
+		return
+	}
+	path, err := s.resolveWorkdirPath(raw)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	content, err := os.ReadFile(path)

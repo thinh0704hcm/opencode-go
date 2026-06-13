@@ -49,9 +49,36 @@ func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, 
 
 	// 2. Publish message.updated(assistant) so the TUI sees the empty bubble
 	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
+	// Publish the auto-created step-start part so the TUI renders the step marker.
+	if len(asst.Parts) > 0 {
+		s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
+	}
 
 	// 3. Run the agent loop
-	s.runAgentLoop(ctx, sessionID, asst.Info.ID, parentID, modelID, texts, images, system, agent)
+	finishReason := s.runAgentLoop(ctx, sessionID, asst.Info.ID, parentID, modelID, texts, images, system, agent)
+
+	// Record terminal reason and compute final step cost for the step-finish part.
+	reason := finishReason
+	if reason == "" {
+		reason = "stop"
+	}
+	aborted := ctx.Err() != nil
+	if aborted {
+		reason = "aborted"
+	}
+
+	var stepTokens *session.Tokens
+	var stepCost float64
+	if info, ok := s.store.MessageInfo(sessionID, asst.Info.ID); ok && info.Tokens != nil {
+		stepTokens = info.Tokens
+		stepCost = computeCost(info.ModelID, info.Tokens.Input, info.Tokens.Output)
+	}
+	if stepTokens == nil {
+		stepTokens = &session.Tokens{}
+	}
+	if sf, ok := s.store.AppendStepFinish(sessionID, asst.Info.ID, reason, stepCost, stepTokens); ok {
+		s.bus.Publish(event.NewMessagePartUpdated(sessionID, sf, time.Now().UnixMilli()))
+	}
 
 	// 4. Final completion
 	s.finishGeneration(sessionID, asst.Info.ID)

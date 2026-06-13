@@ -43,6 +43,41 @@ func (s *Server) chatHistory(sessionID, currentUserMsgID string, currentTexts []
 			continue
 		}
 
+		if role == "assistant" {
+			toolParts := toolPartsOf(msg.Parts)
+			if len(toolParts) > 0 {
+				// Reconstruct: assistant(tool_calls) + tool results + assistant(final text)
+				tcs := make([]provider.ChatToolCall, 0, len(toolParts))
+				for _, tp := range toolParts {
+					inputJSON, _ := json.Marshal(tp.State.Input)
+					tcs = append(tcs, provider.ChatToolCall{
+						ID:   tp.CallID,
+						Type: "function",
+						Function: provider.ChatToolCallFunction{
+							Name:      tp.Tool,
+							Arguments: string(inputJSON),
+						},
+					})
+				}
+				out = append(out, provider.ChatMessage{Role: "assistant", ToolCalls: tcs})
+				for _, tp := range toolParts {
+					output := ""
+					if tp.State != nil {
+						output = tp.State.Output
+					}
+					out = append(out, provider.ChatMessage{
+						Role: "tool", ToolCallID: tp.CallID, Name: tp.Tool, Content: output,
+					})
+				}
+			}
+			// Always include the final text turn (may be empty if purely tool-calling).
+			text := partsText(msg.Parts, "text")
+			if text != "" || len(toolParts) == 0 {
+				out = append(out, provider.ChatMessage{Role: role, Content: provider.TextContent(text)})
+			}
+			continue
+		}
+
 		text := partsText(msg.Parts, "text")
 		content := provider.TextContent(text)
 		if role == "user" && msg.Info.ID == currentUserMsgID {
@@ -53,6 +88,16 @@ func (s *Server) chatHistory(sessionID, currentUserMsgID string, currentTexts []
 
 	if len(out) == 0 || out[len(out)-1].Role != "user" {
 		out = append(out, provider.ChatMessage{Role: "user", Content: provider.MultimodalContent(joinTexts(currentTexts), currentImages)})
+	}
+	return out
+}
+
+func toolPartsOf(parts []session.Part) []session.Part {
+	var out []session.Part
+	for _, p := range parts {
+		if p.Type == "tool" && p.State != nil && p.State.Status != "running" {
+			out = append(out, p)
+		}
 	}
 	return out
 }
@@ -98,8 +143,12 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 	// tool calls have side effects that cannot be undone.
 	commitLen := len(messages)
 
+	var prevInput, prevOutput int64
+
 	for {
 		s.bus.Publish(event.NewSessionNextStepStarted(sessionID, messageID, agent.Name, modelID, s.provider.ID()))
+		stepStartInput := prevInput
+		stepStartOutput := prevOutput
 
 		req := provider.ChatRequest{
 			Model:     modelID,
@@ -222,15 +271,17 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			if info, ok := s.store.MessageInfo(sessionID, messageID); ok {
 				tok := info.Tokens
 				var tokens event.SessionNextStepEndedTokens
+				var stepCost float64
 				if tok != nil {
-					tokens = event.SessionNextStepEndedTokens{
-						Input:  tok.Input,
-						Output: tok.Output,
-					}
+					tokens.Input = tok.Input - stepStartInput
+					tokens.Output = tok.Output - stepStartOutput
 					tokens.Cache.Read = tok.Cache.Read
 					tokens.Cache.Write = tok.Cache.Write
+					stepCost = computeCost(modelID, tokens.Input, tokens.Output)
+					prevInput = tok.Input
+					prevOutput = tok.Output
 				}
-				s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, finishReason, info.Cost, tokens))
+				s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, finishReason, stepCost, tokens))
 			}
 			return finishReason
 		}
@@ -356,13 +407,17 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		if info, ok := s.store.MessageInfo(sessionID, messageID); ok {
 			tok := info.Tokens
 			var tokens event.SessionNextStepEndedTokens
+			var stepCost float64
 			if tok != nil {
-				tokens.Input = tok.Input
-				tokens.Output = tok.Output
+				tokens.Input = tok.Input - stepStartInput
+				tokens.Output = tok.Output - stepStartOutput
 				tokens.Cache.Read = tok.Cache.Read
 				tokens.Cache.Write = tok.Cache.Write
+				stepCost = computeCost(modelID, tokens.Input, tokens.Output)
+				prevInput = tok.Input
+				prevOutput = tok.Output
 			}
-			s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, "tool_calls", info.Cost, tokens))
+			s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, "tool_calls", stepCost, tokens))
 		}
 		commitLen = len(messages)
 		// Loop continues: the next provider turn sees the tool results.
