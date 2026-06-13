@@ -59,7 +59,12 @@ func (s *Server) chatHistory(sessionID, currentUserMsgID string, currentTexts []
 						},
 					})
 				}
-				out = append(out, provider.ChatMessage{Role: "assistant", ToolCalls: tcs})
+				reasoningText := partsText(msg.Parts, "reasoning")
+				out = append(out, provider.ChatMessage{
+					Role:             "assistant",
+					ToolCalls:        tcs,
+					ReasoningContent: reasoningText,
+				})
 				for _, tp := range toolParts {
 					output := ""
 					if tp.State != nil {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/opencode-go/opencode-go/internal/event"
+	"github.com/opencode-go/opencode-go/internal/session"
 )
 
 // handleSessionList serves GET /session, returning a JSON array of all
@@ -115,24 +116,32 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cancelSession(id) // abort any in-flight generation
+	// Remove queue entry to prevent memory leak; cancel already signalled abort.
+	s.sesMu.Lock()
+	delete(s.sesQueue, id)
+	s.sesMu.Unlock()
 	if !s.store.Delete(id) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	s.store.RemovePersisted(id)
-	s.bus.Publish(event.NewSessionDeleted(sess))
+	s.bus.Publish(event.NewSessionDeleted(id, sess))
 	writeJSON(w, http.StatusOK, true)
 }
 
-// handleSessionChildren serves GET /session/{id}/children. No child sessions
-// exist yet, so it returns an empty array (404 if the session is unknown).
+// handleSessionChildren serves GET /session/{id}/children, returning child
+// sessions created by delegate/task tool calls with this session as parent.
 func (s *Server) handleSessionChildren(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := s.store.GetSession(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, []interface{}{})
+	children := s.store.Children(id)
+	if children == nil {
+		children = []session.Session{}
+	}
+	writeJSON(w, http.StatusOK, children)
 }
 
 // handleSessionAbort serves POST /session/{id}/abort. It drains any pending
@@ -148,10 +157,17 @@ func (s *Server) handleSessionAbort(w http.ResponseWriter, r *http.Request) {
 
 	// Drain queue first so no more items start after the cancel.
 	s.sesMu.Lock()
-	if work := s.sesQueue[id]; work != nil {
-		work.queue = work.queue[:0]
-		work.draining = true
+	work := s.sesQueue[id]
+	if work == nil || !work.running {
+		s.sesMu.Unlock()
+		// Already idle — emit idle confirmation so SSE-watching clients unblock.
+		s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
+		s.bus.Publish(event.NewSessionIdle(id))
+		writeJSON(w, http.StatusOK, true)
+		return
 	}
+	work.queue = work.queue[:0]
+	work.draining = true
 	s.sesMu.Unlock()
 
 	s.cancelSession(id)

@@ -846,35 +846,42 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 	if sess, ok := s.store.GetSession(sessionID); ok {
 		s.writeEvent(w, flusher, event.NewSessionUpdated(sessionID, sess), event.KindEvent, "")
 	}
+	
+	// Read store outside the lock: no session-queue state needed here.
+	var replayMsgs []session.MessageWithParts
 	if msgs, ok := s.store.Messages(sessionID); ok {
-		for _, m := range msgs {
-			s.writeEvent(w, flusher, event.NewMessageUpdated(sessionID, m.Info, m.Info.Time.Completed != nil), event.KindEvent, "")
-			for _, p := range m.Parts {
-				s.writeEvent(w, flusher, event.NewMessagePartUpdated(sessionID, p, 0), event.KindEvent, "") // 0 time to let TUI know it's historical
-			}
+		replayMsgs = msgs
+	}
+	for _, m := range replayMsgs {
+		s.writeEvent(w, flusher, event.NewMessageUpdated(sessionID, m.Info, m.Info.Time.Completed != nil), event.KindEvent, "")
+		for _, p := range m.Parts {
+			s.writeEvent(w, flusher, event.NewMessagePartUpdated(sessionID, p, 0), event.KindEvent, "") // 0 time to let TUI know it's historical
 		}
 	}
+
 	s.sesMu.Lock()
 	work := s.sesQueue[sessionID]
-	if work != nil && work.running {
+	isBusy := work != nil && work.running
+	admitSeq := int64(1)
+	if work != nil {
+		admitSeq = work.admitSeq
+	}
+	s.sesMu.Unlock()
+
+	if isBusy {
 		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "busy"}), event.KindEvent, "")
-		// Re-emit the prompt for the current turn so reconnecting clients
-		// see the prompt bubble.
-		if msgs, ok := s.store.Messages(sessionID); ok {
-			for i := len(msgs) - 1; i >= 0; i-- {
-				if msgs[i].Info.Role == "user" {
-					text := partsText(msgs[i].Parts, "text")
-					s.writeEvent(w, flusher, event.NewSessionNextPrompted(sessionID, msgs[i].Info.ID, text, "queue"), event.KindEvent, "")
-					s.writeEvent(w, flusher, event.NewSessionNextPromptAdmitted(sessionID, msgs[i].Info.ID, text, "queue", 1), event.KindEvent, "")
-					break
-				}
+		for i := len(replayMsgs) - 1; i >= 0; i-- {
+			if replayMsgs[i].Info.Role == "user" {
+				text := partsText(replayMsgs[i].Parts, "text")
+				s.writeEvent(w, flusher, event.NewSessionNextPrompted(sessionID, replayMsgs[i].Info.ID, text, "queue"), event.KindEvent, "")
+				s.writeEvent(w, flusher, event.NewSessionNextPromptAdmitted(sessionID, replayMsgs[i].Info.ID, text, "queue", admitSeq), event.KindEvent, "")
+				break
 			}
 		}
 	} else {
 		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}), event.KindEvent, "")
 		s.writeEvent(w, flusher, event.NewSessionIdle(sessionID), event.KindEvent, "")
 	}
-	s.sesMu.Unlock()
 
 	for _, req := range s.perms.List() {
 		if req.SessionID == sessionID {
@@ -965,6 +972,53 @@ func (s *Server) handleV2PermissionSavedList(w http.ResponseWriter, r *http.Requ
 
 // handleV2PermissionSavedDelete serves DELETE /api/permission/saved/{id}.
 func (s *Server) handleV2PermissionSavedDelete(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+}
+
+func (s *Server) handleV2SessionPermissionRequestList(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	list := s.perms.List()
+	data := make([]any, 0)
+	for _, req := range list {
+		if req.SessionID != sessionID {
+			continue
+		}
+		data = append(data, map[string]any{
+			"id":        req.ID,
+			"sessionID": req.SessionID,
+			"tool":      req.Permission,
+			"type":      req.Permission,
+			"title":     "Allow tool: " + req.Permission,
+			"metadata":  map[string]any{},
+			"time":      map[string]any{"created": time.Now().UnixMilli()},
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+func (s *Server) handleV2QuestionRequestList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+func (s *Server) handleV2SessionQuestionReply(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+}
+
+func (s *Server) handleV2SessionQuestionReject(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": true})
 }
 
