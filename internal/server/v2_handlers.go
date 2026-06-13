@@ -839,6 +839,11 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
+	sub, cancel := s.bus.SubscribeFiltered(func(ev event.Event) bool {
+		return eventSessionID(ev) == sessionID
+	})
+	defer cancel()
+
 	// Synthesise state-restore events from persisted store before joining live stream.
 	if !s.writeEvent(w, flusher, event.NewServerConnected(), event.KindEvent, "") {
 		return
@@ -896,11 +901,6 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 			s.writeEvent(w, flusher, event.NewPermissionAsked(askObj), event.KindEvent, "")
 		}
 	}
-
-	sub, cancel := s.bus.SubscribeFiltered(func(ev event.Event) bool {
-		return eventSessionID(ev) == sessionID
-	})
-	defer cancel()
 
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()

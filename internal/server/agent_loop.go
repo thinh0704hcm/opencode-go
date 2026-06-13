@@ -78,7 +78,15 @@ func (s *Server) chatHistory(sessionID, currentUserMsgID string, currentTexts []
 			// Always include the final text turn (may be empty if purely tool-calling).
 			text := partsText(msg.Parts, "text")
 			if text != "" || len(toolParts) == 0 {
-				out = append(out, provider.ChatMessage{Role: role, Content: provider.TextContent(text)})
+				var reasoningText string
+				if len(toolParts) == 0 {
+					reasoningText = partsText(msg.Parts, "reasoning")
+				}
+				out = append(out, provider.ChatMessage{
+					Role:             role,
+					Content:          provider.TextContent(text),
+					ReasoningContent: reasoningText,
+				})
 			}
 			continue
 		}
