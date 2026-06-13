@@ -49,6 +49,10 @@ const (
 	TypeSessionNextToolSuccess      = "session.next.tool.success"
 	TypeSessionNextToolFailed       = "session.next.tool.failed"
 	TypeSessionNextRetried          = "session.next.retried"
+
+	TypeSessionNextReasoningStarted = "session.next.reasoning.started"
+	TypeSessionNextReasoningDelta   = "session.next.reasoning.delta"
+	TypeSessionNextReasoningEnded   = "session.next.reasoning.ended"
 )
 
 // PartDeltaProps is the properties shape for message.part.delta.
@@ -59,6 +63,29 @@ type PartDeltaProps struct {
 	PartID    string `json:"partID"`
 	Field     string `json:"field"`
 	Delta     string `json:"delta"`
+}
+
+type SessionNextReasoningStartedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	ReasoningID        string `json:"reasoningID"`
+}
+
+type SessionNextReasoningDeltaProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	ReasoningID        string `json:"reasoningID"`
+	Delta              string `json:"delta"`
+}
+
+type SessionNextReasoningEndedProps struct {
+	Timestamp          int64  `json:"timestamp"`
+	SessionID          string `json:"sessionID"`
+	AssistantMessageID string `json:"assistantMessageID"`
+	ReasoningID        string `json:"reasoningID"`
+	Text               string `json:"text"`
 }
 
 // PartUpdatedProps is the properties shape for message.part.updated.
@@ -94,7 +121,8 @@ type SessionUpdatedProps struct {
 
 // SessionDeletedProps is the properties shape for session.deleted.
 type SessionDeletedProps struct {
-	Info any `json:"info"`
+	SessionID string `json:"sessionID"`
+	Info      any    `json:"info"`
 }
 
 // SessionErrorProps is the properties shape for session.error.
@@ -163,9 +191,9 @@ func NewSessionUpdated(sessionID string, info any) Event {
 }
 
 // NewSessionDeleted creates a session.deleted event carrying the Session info.
-func NewSessionDeleted(info any) Event {
+func NewSessionDeleted(sessionID string, info any) Event {
 	return Event{ID: newID("evt"), Type: TypeSessionDeleted,
-		Properties: SessionDeletedProps{Info: info}}
+		Properties: SessionDeletedProps{SessionID: sessionID, Info: info}}
 }
 
 // NewSessionError creates a session.error event.
@@ -224,6 +252,8 @@ func (e Event) IsFinalAssistant() bool {
 func (e Event) GuaranteedDelivery() bool {
 	switch e.Type {
 	case TypeSessionIdle, TypeSessionError,
+		TypeSessionStatus, TypeSessionUpdated, TypeSessionDeleted,
+		TypeSessionNextPromptAdmitted,
 		TypePermissionAsked, TypePermissionUpdated:
 		return true
 	case TypeMessageUpdated:
@@ -232,6 +262,7 @@ func (e Event) GuaranteedDelivery() bool {
 		return false // deltas + everything else are droppable
 	}
 }
+
 type SessionNextPromptProps struct {
 	Timestamp   int64  `json:"timestamp"`
 	SessionID   string `json:"sessionID"`
@@ -473,6 +504,47 @@ func NewSessionNextStepFailed(sessionID, assistantMsgID, errType, errMsg string)
 				Type    string `json:"type"`
 				Message string `json:"message"`
 			}{Type: errType, Message: errMsg},
+		},
+	}
+}
+
+func NewSessionNextReasoningStarted(sessionID, messageID, reasoningID string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextReasoningStarted,
+		Properties: SessionNextReasoningStartedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: messageID,
+			ReasoningID:        reasoningID,
+		},
+	}
+}
+
+func NewSessionNextReasoningDelta(sessionID, messageID, reasoningID, delta string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextReasoningDelta,
+		Properties: SessionNextReasoningDeltaProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: messageID,
+			ReasoningID:        reasoningID,
+			Delta:              delta,
+		},
+	}
+}
+
+func NewSessionNextReasoningEnded(sessionID, messageID, reasoningID, text string) Event {
+	return Event{
+		ID:   newID("evt"),
+		Type: TypeSessionNextReasoningEnded,
+		Properties: SessionNextReasoningEndedProps{
+			Timestamp:          time.Now().UnixMilli(),
+			SessionID:          sessionID,
+			AssistantMessageID: messageID,
+			ReasoningID:        reasoningID,
+			Text:               text,
 		},
 	}
 }

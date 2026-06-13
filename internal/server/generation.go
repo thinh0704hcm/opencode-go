@@ -167,6 +167,10 @@ func (s *Server) emitDelta(sessionID, messageID, field, delta string) {
 // finishGeneration marks the assistant message completed and publishes the
 // final message.updated (guaranteed-delivery, the canonical completion signal).
 func (s *Server) finishGeneration(sessionID, messageID string) {
+	updated := s.store.FinishOpenParts(sessionID, messageID)
+	for i := range updated {
+		s.bus.Publish(event.NewMessagePartUpdated(sessionID, updated[i], time.Now().UnixMilli()))
+	}
 	info, ok := s.store.CompleteAssistantMessage(sessionID, messageID)
 	if !ok {
 		return

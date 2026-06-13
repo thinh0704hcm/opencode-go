@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/base64"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -43,10 +44,16 @@ func (s *Server) handleV2Location(w http.ResponseWriter, r *http.Request) {
 }
 
 type sessionV2Info struct {
-	ID       string  `json:"id"`
-	ParentID string  `json:"parentID,omitempty"`
-	Cost     float64 `json:"cost"`
-	Tokens   struct {
+	ID        string `json:"id"`
+	ParentID  string `json:"parentID,omitempty"`
+	ProjectID string `json:"projectID"`
+	Agent     string `json:"agent,omitempty"`
+	Model     *struct {
+		ID         string `json:"id"`
+		ProviderID string `json:"providerID"`
+	} `json:"model,omitempty"`
+	Cost   float64 `json:"cost"`
+	Tokens struct {
 		Input     int64 `json:"input"`
 		Output    int64 `json:"output"`
 		Reasoning int64 `json:"reasoning"`
@@ -148,10 +155,15 @@ func (s *Server) handleV2SessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) mapToV2Info(sess session.Session) sessionV2Info {
+	projID := filepath.Base(sess.Directory)
+	if projID == "." || projID == "" || projID == string(filepath.Separator) {
+		projID = "global"
+	}
 	info := sessionV2Info{
-		ID:       sess.ID,
-		ParentID: sess.ParentID,
-		Title:    sess.Title,
+		ID:        sess.ID,
+		ParentID:  sess.ParentID,
+		ProjectID: projID,
+		Title:     sess.Title,
 	}
 	info.Time.Created = sess.Time.Created
 	info.Time.Updated = sess.Time.Updated
@@ -166,6 +178,16 @@ func (s *Server) mapToV2Info(sess session.Session) sessionV2Info {
 				info.Tokens.Reasoning += m.Info.Tokens.Reasoning
 				info.Tokens.Cache.Read += m.Info.Tokens.Cache.Read
 				info.Tokens.Cache.Write += m.Info.Tokens.Cache.Write
+			}
+			if m.Info.Role == "assistant" && m.Info.ModelID != "" {
+				info.Agent = m.Info.Agent
+				info.Model = &struct {
+					ID         string `json:"id"`
+					ProviderID string `json:"providerID"`
+				}{
+					ID:         m.Info.ProviderID + "/" + m.Info.ModelID,
+					ProviderID: m.Info.ProviderID,
+				}
 			}
 		}
 	}
@@ -323,7 +345,11 @@ func (s *Server) handleV2SessionWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sub, cancel := s.bus.Subscribe()
+	// Subscribe BEFORE reading work.running to avoid missing the idle event
+	// that fires between the lock-release and the channel read.
+	sub, cancel := s.bus.SubscribeFiltered(func(ev event.Event) bool {
+		return ev.Type == event.TypeSessionIdle && eventSessionID(ev) == sessionID
+	})
 	defer cancel()
 
 	s.sesMu.Lock()
@@ -341,13 +367,13 @@ func (s *Server) handleV2SessionWait(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case ev := <-sub.Events():
-			if ev.Type == event.TypeSessionIdle {
-				if eventSessionID(ev) == sessionID {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
+		case _, ok := <-sub.Events():
+			if !ok {
+				w.WriteHeader(http.StatusNoContent)
+				return
 			}
+			w.WriteHeader(http.StatusNoContent)
+			return
 		case <-ticker.C:
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -374,21 +400,7 @@ func eventSessionID(ev event.Event) string {
 	case event.SessionErrorProps:
 		return p.SessionID
 	case event.SessionDeletedProps:
-		switch info := p.Info.(type) {
-		case session.Session:
-			return info.ID
-		case *session.Session:
-			if info != nil {
-				return info.ID
-			}
-		case map[string]any:
-			if sid, ok := info["id"].(string); ok {
-				return sid
-			}
-			if sid, ok := info["ID"].(string); ok {
-				return sid
-			}
-		}
+		return p.SessionID
 	case event.PermissionRepliedProps:
 		return p.SessionID
 	case map[string]any:
@@ -402,6 +414,12 @@ func eventSessionID(ev event.Event) string {
 	case event.SessionNextStepEndedProps:
 		return p.SessionID
 	case event.SessionNextStepFailedProps:
+		return p.SessionID
+	case event.SessionNextReasoningStartedProps:
+		return p.SessionID
+	case event.SessionNextReasoningDeltaProps:
+		return p.SessionID
+	case event.SessionNextReasoningEndedProps:
 		return p.SessionID
 	case event.SessionNextTextStartedProps:
 		return p.SessionID
@@ -487,11 +505,12 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 			modelID = m.Info.Model.ModelID
 		}
 		return map[string]any{
-			"id":    m.Info.ID,
-			"type":  "user",
-			"time":  map[string]any{"created": m.Info.Time.Created},
-			"text":  partsText(m.Parts, "text"),
-			"agent": m.Info.Agent,
+			"id":        m.Info.ID,
+			"sessionID": m.Info.SessionID,
+			"role":      "user",
+			"time":      map[string]any{"created": m.Info.Time.Created},
+			"text":      partsText(m.Parts, "text"),
+			"agent":     m.Info.Agent,
 			"model": map[string]any{
 				"id":         providerID + "/" + modelID,
 				"providerID": providerID,
@@ -513,39 +532,86 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 			if p.Text == "" {
 				continue
 			}
-			content = append(content, map[string]any{
+			rp := map[string]any{
 				"type": "reasoning",
 				"id":   p.ID,
 				"text": p.Text,
-			})
+			}
+			if p.Time != nil {
+				var endMS any
+				if p.Time.End != nil {
+					endMS = *p.Time.End
+				}
+				rp["time"] = map[string]any{"start": p.Time.Start, "end": endMS}
+			}
+			content = append(content, rp)
 		case "tool":
 			if p.State == nil {
 				continue
 			}
 			state := map[string]any{
-				"status": p.State.Status,
-				"input":  p.State.Input,
-				"output": p.State.Output,
+				"status":   p.State.Status,
+				"input":    p.State.Input,
+				"title":    p.State.Title,
+				"metadata": p.State.Metadata,
+			}
+			if p.State.Status == "error" {
+				state["error"] = p.State.Output
+			} else {
+				state["output"] = p.State.Output
+			}
+			if p.State.Time != nil {
+				endVal := p.State.Time.End
+				var endMS any
+				if endVal != nil {
+					endMS = *endVal
+				}
+				state["time"] = map[string]any{
+					"start": p.State.Time.Start,
+					"end":   endMS,
+				}
 			}
 			content = append(content, map[string]any{
-				"type":  "tool",
-				"id":    p.ID,
-				"name":  p.Tool,
-				"state": state,
+				"type":     "tool",
+				"id":       p.ID,
+				"callID":   p.CallID,
+				"tool":     p.Tool,
+				"sessionID": p.SessionID,
+				"messageID": p.MessageID,
+				"state":    state,
 			})
-		case "step-start", "step-finish":
+		case "step-start":
 			content = append(content, map[string]any{
-				"type": p.Type,
-				"id":   p.ID,
+				"type":      "step-start",
+				"id":        p.ID,
+				"sessionID": p.SessionID,
+				"messageID": p.MessageID,
 			})
+		case "step-finish":
+			sf := map[string]any{
+				"type":      "step-finish",
+				"id":        p.ID,
+				"sessionID": p.SessionID,
+				"messageID": p.MessageID,
+				"reason":    p.Reason,
+				"cost":      p.Cost,
+			}
+			if p.Tokens != nil {
+				sf["tokens"] = p.Tokens
+			}
+			content = append(content, sf)
 		}
 	}
 
 	asst := map[string]any{
-		"id":      m.Info.ID,
-		"type":    "assistant",
-		"time":    map[string]any{"created": m.Info.Time.Created, "completed": m.Info.Time.Completed},
-		"agent":   m.Info.Agent,
+		"id":         m.Info.ID,
+		"sessionID":  m.Info.SessionID,
+		"role":       "assistant",
+		"parentID":   m.Info.ParentID,
+		"providerID": m.Info.ProviderID,
+		"modelID":    m.Info.ModelID,
+		"agent":      m.Info.Agent,
+		"time":       map[string]any{"created": m.Info.Time.Created, "completed": m.Info.Time.Completed},
 		"model": map[string]any{
 			"id":         m.Info.ProviderID + "/" + m.Info.ModelID,
 			"providerID": m.Info.ProviderID,
@@ -783,6 +849,18 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 	work := s.sesQueue[sessionID]
 	if work != nil && work.running {
 		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "busy"}), event.KindEvent, "")
+		// Re-emit the prompt for the current turn so reconnecting clients
+		// see the prompt bubble.
+		if msgs, ok := s.store.Messages(sessionID); ok {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Info.Role == "user" {
+					text := partsText(msgs[i].Parts, "text")
+					s.writeEvent(w, flusher, event.NewSessionNextPrompted(sessionID, msgs[i].Info.ID, text, "queue"), event.KindEvent, "")
+					s.writeEvent(w, flusher, event.NewSessionNextPromptAdmitted(sessionID, msgs[i].Info.ID, text, "queue", 1), event.KindEvent, "")
+					break
+				}
+			}
+		}
 	} else {
 		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}), event.KindEvent, "")
 		s.writeEvent(w, flusher, event.NewSessionIdle(sessionID), event.KindEvent, "")
@@ -835,4 +913,131 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 
 func eventBelongsToSession(ev event.Event, sessionID string) bool {
 	return eventSessionID(ev) == sessionID
+}
+
+// handleV2GlobalEvent serves GET /api/event — the v2 global SSE stream.
+// It mirrors /global/event but sends bare events (no {directory, payload} wrapper).
+func (s *Server) handleV2GlobalEvent(w http.ResponseWriter, r *http.Request) {
+	s.serveSSE(w, r, event.KindEvent, directoryOf(r))
+}
+
+// handleV2CommandList serves GET /api/command — returns empty array stub.
+func (s *Server) handleV2CommandList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+// handleV2SkillList serves GET /api/skill — returns empty array stub.
+func (s *Server) handleV2SkillList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+// handleV2PermissionRequestList serves GET /api/permission/request.
+func (s *Server) handleV2PermissionRequestList(w http.ResponseWriter, r *http.Request) {
+	list := s.perms.List()
+	data := make([]any, 0, len(list))
+	for _, req := range list {
+		data = append(data, map[string]any{
+			"id":        req.ID,
+			"sessionID": req.SessionID,
+			"tool":      req.Permission,
+			"type":      req.Permission,
+			"title":     "Allow tool: " + req.Permission,
+			"metadata":  map[string]any{},
+			"time":      map[string]any{"created": time.Now().UnixMilli()},
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+// handleV2PermissionSavedList serves GET /api/permission/saved.
+func (s *Server) handleV2PermissionSavedList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+// handleV2PermissionSavedDelete serves DELETE /api/permission/saved/{id}.
+func (s *Server) handleV2PermissionSavedDelete(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+}
+
+// handleV2SessionContext serves GET /api/session/{sessionID}/context.
+func (s *Server) handleV2SessionContext(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+// handleV2SessionCompact serves POST /api/session/{sessionID}/compact.
+func (s *Server) handleV2SessionCompact(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+}
+
+// handleV2SessionPermissionReply serves POST /api/session/{sessionID}/permission/request/{requestID}/reply.
+func (s *Server) handleV2SessionPermissionReply(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	requestID := r.PathValue("requestID")
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	var body struct {
+		Response string `json:"response"`
+		Decision string `json:"decision"`
+	}
+	_ = decodeBody(r, &body)
+	reply := body.Response
+	if reply == "" {
+		reply = body.Decision
+	}
+	if reply == "" {
+		reply = "once"
+	}
+	if err := s.perms.Reply(requestID, reply); err != nil {
+		writeError(w, http.StatusNotFound, "permission request not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+}
+
+// handleV2FSList serves GET /api/fs/list — lists directory contents.
+func (s *Server) handleV2FSList(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = s.workdir
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	data := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		data = append(data, map[string]any{
+			"name": e.Name(),
+			"type": map[bool]string{true: "directory", false: "file"}[e.IsDir()],
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+// handleV2FSRead serves GET /api/fs/read — reads a file.
+func (s *Server) handleV2FSRead(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"data": ""})
+		return
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": string(content)})
 }

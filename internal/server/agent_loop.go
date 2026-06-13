@@ -99,6 +99,8 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 	commitLen := len(messages)
 
 	for {
+		s.bus.Publish(event.NewSessionNextStepStarted(sessionID, messageID, agent.Name, modelID, s.provider.ID()))
+
 		req := provider.ChatRequest{
 			Model:     modelID,
 			Messages:  messages,
@@ -109,6 +111,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 
 		var calls []provider.ToolCall
 		var finishReason string
+		var reasoningID string
 		var reasoning strings.Builder
 		var textID string
 		var textBuf strings.Builder
@@ -132,6 +135,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				s.store.DropTextAndReasoningParts(sessionID, messageID)
 				calls = calls[:0]
 				finishReason = ""
+				reasoningID = ""
 				reasoning.Reset()
 				textID = ""
 				textBuf.Reset()
@@ -168,7 +172,12 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 					s.emitDelta(sessionID, messageID, "text", chunk.TextDelta)
 				}
 				if chunk.ReasoningDelta != "" {
+					if reasoningID == "" {
+						reasoningID = event.NewID("rsn")
+						s.bus.Publish(event.NewSessionNextReasoningStarted(sessionID, messageID, reasoningID))
+					}
 					reasoning.WriteString(chunk.ReasoningDelta)
+					s.bus.Publish(event.NewSessionNextReasoningDelta(sessionID, messageID, reasoningID, chunk.ReasoningDelta))
 					s.emitDelta(sessionID, messageID, "reasoning", chunk.ReasoningDelta)
 				}
 				if chunk.ToolCall != nil {
@@ -196,6 +205,12 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			break // stream completed successfully
 		} // end retry loop
 
+		if reasoningID != "" {
+			s.bus.Publish(event.NewSessionNextReasoningEnded(sessionID, messageID, reasoningID, reasoning.String()))
+			reasoningID = ""
+			reasoning.Reset()
+		}
+
 		if textID != "" {
 			s.bus.Publish(event.NewSessionNextTextEnded(sessionID, messageID, textID, textBuf.String()))
 			textID = ""
@@ -204,6 +219,19 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 
 		// No tool calls: the model produced its final text turn.
 		if len(calls) == 0 {
+			if info, ok := s.store.MessageInfo(sessionID, messageID); ok {
+				tok := info.Tokens
+				var tokens event.SessionNextStepEndedTokens
+				if tok != nil {
+					tokens = event.SessionNextStepEndedTokens{
+						Input:  tok.Input,
+						Output: tok.Output,
+					}
+					tokens.Cache.Read = tok.Cache.Read
+					tokens.Cache.Write = tok.Cache.Write
+				}
+				s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, finishReason, info.Cost, tokens))
+			}
 			return finishReason
 		}
 
@@ -310,7 +338,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				}
 			}
 
-			out, isError := executeToolCall(ctx, s.tools, sb, call)
+			out, isError := executeToolCall(withSessionID(ctx, sessionID), s.tools, sb, call)
 			status := "completed"
 			if isError {
 				status = "error"
@@ -325,6 +353,17 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		}
 		// Tool results have been committed; the next iteration cannot safely retry
 		// from scratch because tool calls have side effects.
+		if info, ok := s.store.MessageInfo(sessionID, messageID); ok {
+			tok := info.Tokens
+			var tokens event.SessionNextStepEndedTokens
+			if tok != nil {
+				tokens.Input = tok.Input
+				tokens.Output = tok.Output
+				tokens.Cache.Read = tok.Cache.Read
+				tokens.Cache.Write = tok.Cache.Write
+			}
+			s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, "tool_calls", info.Cost, tokens))
+		}
 		commitLen = len(messages)
 		// Loop continues: the next provider turn sees the tool results.
 	}
