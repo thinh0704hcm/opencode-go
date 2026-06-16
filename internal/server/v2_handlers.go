@@ -172,7 +172,9 @@ func (s *Server) mapToV2Info(sess session.Session) sessionV2Info {
 
 	if msgs, ok := s.store.Messages(sess.ID); ok {
 		for _, m := range msgs {
-			info.Cost += m.Info.Cost
+			if m.Info.Cost != nil {
+				info.Cost += *m.Info.Cost
+			}
 			if m.Info.Tokens != nil {
 				info.Tokens.Input += m.Info.Tokens.Input
 				info.Tokens.Output += m.Info.Tokens.Output
@@ -305,17 +307,58 @@ func (s *Server) handleV2SessionPrompt(w http.ResponseWriter, r *http.Request) {
 		modelID = req.Model.ModelID
 	}
 
-	msg, ok := s.store.AppendUserMessage(sessionID, msgID, providerID, modelID, agent.Name, texts)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, sessionNotFoundError)
-		return
-	}
-	if updated, ok := s.store.GetSession(sessionID); ok {
-		s.bus.Publish(event.NewSessionUpdated(sessionID, updated))
-	}
-	s.publishUserMessage(sessionID, msg)
+	var resumeID string
+	var targetParentID = msgID
 
-	seq, ok := s.startOrQueue(sessionID, msgID, providerID, modelID, texts, images, "", agent, delivery)
+	if req.Resume {
+		msgs, ok := s.store.Messages(sessionID)
+		if !ok {
+			// A newly created session without messages still returns ok=true if session exists
+			// so if ok=false the session really does not exist.
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Info.Role == "assistant" {
+				resumeID = msgs[i].Info.ID
+				break
+			}
+		}
+		if resumeID == "" {
+			writeError(w, http.StatusBadRequest, "no assistant message to resume")
+			return
+		}
+
+		if len(texts) == 0 && len(images) == 0 {
+			// Pure resume: do not create an empty user message.
+			targetParentID = "" // ignored when resuming
+		} else {
+			// Resume with a prompt: append user message as usual, then resume.
+			// (Documented behavior: treated as normal prompt + resume flag)
+			msg, ok := s.store.AppendUserMessage(sessionID, msgID, providerID, modelID, agent.Name, texts)
+			if !ok {
+				writeError(w, http.StatusNotFound, "session not found")
+				return
+			}
+			if updated, ok := s.store.GetSession(sessionID); ok {
+				s.bus.Publish(event.NewSessionUpdated(sessionID, updated))
+			}
+			s.publishUserMessage(sessionID, msg)
+		}
+	} else {
+		// Normal generation request
+		msg, ok := s.store.AppendUserMessage(sessionID, msgID, providerID, modelID, agent.Name, texts)
+		if !ok {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if updated, ok := s.store.GetSession(sessionID); ok {
+			s.bus.Publish(event.NewSessionUpdated(sessionID, updated))
+		}
+		s.publishUserMessage(sessionID, msg)
+	}
+
+	seq, ok := s.startOrQueue(sessionID, targetParentID, resumeID, providerID, modelID, texts, images, "", agent, delivery)
 	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"_tag":     "ConflictError",
@@ -326,7 +369,7 @@ func (s *Server) handleV2SessionPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.bus.Publish(event.NewSessionNextPrompted(sessionID, msgID, req.Prompt.Text, delivery))
-	s.bus.Publish(event.NewSessionNextPromptAdmitted(sessionID, msgID, req.Prompt.Text, delivery, seq))
+	s.bus.Publish(event.NewSessionNextPromptAdmitted(sessionID, msgID, req.Prompt.Text, delivery))
 
 	resp := sessionInputAdmitted{
 		AdmittedSeq: seq,
@@ -505,14 +548,15 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 			providerID = m.Info.Model.ProviderID
 			modelID = m.Info.Model.ModelID
 		}
-		return map[string]any{
-			"id":        m.Info.ID,
-			"sessionID": m.Info.SessionID,
-			"role":      "user",
-			"time":      map[string]any{"created": m.Info.Time.Created},
-			"text":      partsText(m.Parts, "text"),
-			"agent":     m.Info.Agent,
-			"model": map[string]any{
+			return map[string]any{
+				"id":        m.Info.ID,
+				"sessionID": m.Info.SessionID,
+				"type":      "user",
+				"time":      map[string]any{"created": m.Info.Time.Created},
+				"text":      partsText(m.Parts, "text"),
+				"agent":     m.Info.Agent,
+				"metadata":  map[string]any{},
+				"model": map[string]any{
 				"id":         providerID + "/" + modelID,
 				"providerID": providerID,
 				"modelID":    modelID,
@@ -554,8 +598,30 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 				rp["time"] = map[string]any{"start": p.Time.Start, "end": endMS}
 			}
 			content = append(content, rp)
+		case "subtask":
+			sp := map[string]any{
+				"type":        "subtask",
+				"id":          p.ID,
+				"prompt":      p.Prompt,
+				"description": p.Description,
+				"agent":       p.Agent,
+			}
+			if p.Model != nil {
+				sp["model"] = map[string]any{
+					"providerID": p.Model.ProviderID,
+					"modelID":    p.Model.ModelID,
+				}
+			}
+			if p.TargetSessionID != "" {
+				sp["sessionID"] = p.TargetSessionID
+			}
+			content = append(content, sp)
 		case "tool":
 			if p.State == nil {
+				continue
+			}
+			// Skip generic tool representation for delegate/task if we already emitted a subtask part.
+			if p.Tool == "delegate" || p.Tool == "task" {
 				continue
 			}
 			state := map[string]any{
@@ -615,7 +681,7 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 	asst := map[string]any{
 		"id":         m.Info.ID,
 		"sessionID":  m.Info.SessionID,
-		"role":       "assistant",
+		"type":       "assistant",
 		"parentID":   m.Info.ParentID,
 		"providerID": m.Info.ProviderID,
 		"modelID":    m.Info.ModelID,
@@ -633,16 +699,22 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 	if m.Info.Tokens != nil {
 		asst["tokens"] = m.Info.Tokens
 	}
+	if asst["type"] == nil || asst["type"] == "" {
+		asst["type"] = "assistant"
+	}
 	return asst
 }
 
 type agentV2Info struct {
 	ID          string `json:"id"`
 	Mode        string `json:"mode"`
-	Hidden      bool   `json:"hidden"`
 	Description string `json:"description,omitempty"`
 	System      string `json:"system,omitempty"`
 	Permissions []any  `json:"permissions"`
+	Request     struct {
+		Headers map[string]string `json:"headers"`
+		Body    map[string]any    `json:"body"`
+	} `json:"request"`
 }
 
 func (s *Server) handleV2AgentList(w http.ResponseWriter, r *http.Request) {
@@ -656,13 +728,16 @@ func (s *Server) handleV2AgentList(w http.ResponseWriter, r *http.Request) {
 
 	for _, name := range names {
 		a := agents[name]
-		data = append(data, agentV2Info{
+		info := agentV2Info{
 			ID:          a.Name,
 			Mode:        a.Mode,
 			Description: a.Description,
 			System:      a.Prompt,
 			Permissions: []any{},
-		})
+		}
+		info.Request.Headers = map[string]string{}
+		info.Request.Body = map[string]any{}
+		data = append(data, info)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"location": map[string]any{"directory": s.workdir},
@@ -684,14 +759,22 @@ type modelV2Info struct {
 		Context int `json:"context"`
 		Output  int `json:"output"`
 	} `json:"limit"`
-	Cost struct {
-		Input  float64 `json:"input"`
-		Output float64 `json:"output"`
-		Cache  struct {
-			Read  float64 `json:"read"`
-			Write float64 `json:"write"`
-		} `json:"cache"`
-	} `json:"cost"`
+	Cost []map[string]any `json:"cost"`
+	API  struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Package string `json:"package"`
+		URL     string `json:"url,omitempty"`
+	} `json:"api"`
+	Request struct {
+		Headers map[string]string `json:"headers"`
+		Body    map[string]any    `json:"body"`
+	} `json:"request"`
+	Variants []any `json:"variants"`
+	Time     struct {
+		Released int64 `json:"released"`
+	} `json:"time"`
+	Status string `json:"status"`
 }
 
 func (s *Server) handleV2ModelList(w http.ResponseWriter, r *http.Request) {
@@ -725,6 +808,14 @@ func (s *Server) handleV2ModelList(w http.ResponseWriter, r *http.Request) {
 					info.Limit.Output = int(o)
 				}
 			}
+			info.Cost = []map[string]any{{"input": 0.0, "output": 0.0, "cache": map[string]any{"read": 0.0, "write": 0.0}}}
+			info.API.ID = mid
+			info.API.Type = "aisdk"
+			info.API.Package = ""
+			info.Request.Headers = map[string]string{}
+			info.Request.Body = map[string]any{}
+			info.Variants = []any{}
+			info.Status = "active"
 			data = append(data, info)
 		}
 	}
@@ -740,6 +831,14 @@ type providerV2Info struct {
 	Name    string   `json:"name"`
 	Enabled any      `json:"enabled"` // false | {"via":"env","name":"VAR"}
 	Env     []string `json:"env"`
+	API     struct {
+		Type    string `json:"type"`
+		Package string `json:"package"`
+	} `json:"api"`
+	Request struct {
+		Headers map[string]string `json:"headers"`
+		Body    map[string]any    `json:"body"`
+	} `json:"request"`
 }
 
 func (s *Server) handleV2ProviderList(w http.ResponseWriter, r *http.Request) {
@@ -751,6 +850,11 @@ func (s *Server) handleV2ProviderList(w http.ResponseWriter, r *http.Request) {
 			Name: p.Name,
 			Env:  p.Env,
 		}
+		info.API.Type = "aisdk"
+		info.API.Package = ""
+		info.Request.Headers = map[string]string{}
+		info.Request.Body = map[string]any{}
+
 		isConnected := false
 		for _, cid := range reg.Connected {
 			if cid == p.ID {
@@ -797,6 +901,11 @@ func (s *Server) handleV2ProviderGet(w http.ResponseWriter, r *http.Request) {
 		Name: target.Name,
 		Env:  target.Env,
 	}
+	info.API.Type = "aisdk"
+	info.API.Package = ""
+	info.Request.Headers = map[string]string{}
+	info.Request.Body = map[string]any{}
+
 	isConnected := false
 	for _, cid := range reg.Connected {
 		if cid == target.ID {
@@ -839,17 +948,23 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
+	// Subscribe FIRST so the live stream captures all events during state reads and flushes.
 	sub, cancel := s.bus.SubscribeFiltered(func(ev event.Event) bool {
 		return eventSessionID(ev) == sessionID
 	})
 	defer cancel()
+
+	// Map to track what we've already sent to avoid obvious duplicates from the IO window.
+	sentEvents := make(map[string]bool)
 
 	// Synthesise state-restore events from persisted store before joining live stream.
 	if !s.writeEvent(w, flusher, event.NewServerConnected(), event.KindEvent, "") {
 		return
 	}
 	if sess, ok := s.store.GetSession(sessionID); ok {
-		s.writeEvent(w, flusher, event.NewSessionUpdated(sessionID, sess), event.KindEvent, "")
+		ev := event.NewSessionUpdated(sessionID, sess)
+		s.writeEvent(w, flusher, ev, event.KindEvent, "")
+		sentEvents[ev.ID] = true
 	}
 	
 	// Read store outside the lock: no session-queue state needed here.
@@ -858,34 +973,46 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 		replayMsgs = msgs
 	}
 	for _, m := range replayMsgs {
-		s.writeEvent(w, flusher, event.NewMessageUpdated(sessionID, m.Info, m.Info.Time.Completed != nil), event.KindEvent, "")
+		ev := event.NewMessageUpdated(sessionID, m.Info, m.Info.Time.Completed != nil)
+		s.writeEvent(w, flusher, ev, event.KindEvent, "")
+		sentEvents[ev.ID] = true
 		for _, p := range m.Parts {
-			s.writeEvent(w, flusher, event.NewMessagePartUpdated(sessionID, p, 0), event.KindEvent, "") // 0 time to let TUI know it's historical
+			evP := event.NewMessagePartUpdated(sessionID, p, 0) // 0 time to let TUI know it's historical
+			s.writeEvent(w, flusher, evP, event.KindEvent, "")
+			sentEvents[evP.ID] = true
 		}
 	}
 
 	s.sesMu.Lock()
 	work := s.sesQueue[sessionID]
 	isBusy := work != nil && work.running
-	admitSeq := int64(1)
-	if work != nil {
-		admitSeq = work.admitSeq
-	}
 	s.sesMu.Unlock()
 
 	if isBusy {
-		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "busy"}), event.KindEvent, "")
+		evSt := event.NewSessionStatus(sessionID, map[string]string{"type": "busy"})
+		s.writeEvent(w, flusher, evSt, event.KindEvent, "")
+		sentEvents[evSt.ID] = true
 		for i := len(replayMsgs) - 1; i >= 0; i-- {
 			if replayMsgs[i].Info.Role == "user" {
 				text := partsText(replayMsgs[i].Parts, "text")
-				s.writeEvent(w, flusher, event.NewSessionNextPrompted(sessionID, replayMsgs[i].Info.ID, text, "queue"), event.KindEvent, "")
-				s.writeEvent(w, flusher, event.NewSessionNextPromptAdmitted(sessionID, replayMsgs[i].Info.ID, text, "queue", admitSeq), event.KindEvent, "")
+				evP := event.NewSessionNextPrompted(sessionID, replayMsgs[i].Info.ID, text, "queue")
+				s.writeEvent(w, flusher, evP, event.KindEvent, "")
+				sentEvents[evP.ID] = true
+
+				evA := event.NewSessionNextPromptAdmitted(sessionID, replayMsgs[i].Info.ID, text, "queue")
+				s.writeEvent(w, flusher, evA, event.KindEvent, "")
+				sentEvents[evA.ID] = true
 				break
 			}
 		}
 	} else {
-		s.writeEvent(w, flusher, event.NewSessionStatus(sessionID, map[string]string{"type": "idle"}), event.KindEvent, "")
-		s.writeEvent(w, flusher, event.NewSessionIdle(sessionID), event.KindEvent, "")
+		evSt := event.NewSessionStatus(sessionID, map[string]string{"type": "idle"})
+		s.writeEvent(w, flusher, evSt, event.KindEvent, "")
+		sentEvents[evSt.ID] = true
+
+		evI := event.NewSessionIdle(sessionID)
+		s.writeEvent(w, flusher, evI, event.KindEvent, "")
+		sentEvents[evI.ID] = true
 	}
 
 	for _, req := range s.perms.List() {
@@ -898,7 +1025,9 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 				"pattern":   "",
 				"always":    []any{},
 			}
-			s.writeEvent(w, flusher, event.NewPermissionAsked(askObj), event.KindEvent, "")
+			evAsk := event.NewPermissionAsked(askObj)
+			s.writeEvent(w, flusher, evAsk, event.KindEvent, "")
+			sentEvents[evAsk.ID] = true
 		}
 	}
 
@@ -912,6 +1041,9 @@ func (s *Server) handleV2SessionEvent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !eventBelongsToSession(ev, sessionID) {
+				continue
+			}
+			if sentEvents[ev.ID] {
 				continue
 			}
 			if !s.writeEvent(w, flusher, ev, event.KindEvent, "") {
