@@ -57,7 +57,10 @@ func (a *toolAdapter) Execute(ctx context.Context, input json.RawMessage, _ *too
 		return tool.Result{}, err
 	}
 	if isErr {
-		return tool.Result{Output: text}, fmt.Errorf("mcp tool %q returned an error", a.fullName)
+		if text == "" {
+			text = fmt.Sprintf("mcp tool %q returned an error", a.fullName)
+		}
+		return tool.Result{Output: text}, fmt.Errorf("%s", text)
 	}
 	return tool.Result{Output: text}, nil
 }

@@ -19,6 +19,11 @@ type ChatMessage struct {
 	// OpenAI requires this assistant message to precede the matching tool
 	// result messages (ToolCallID).
 	ToolCalls []ChatToolCall `json:"tool_calls,omitempty"`
+	// ReasoningContent mirrors the AI SDK openai-compatible wire shape: when an
+	// assistant turn produced reasoning, the field is echoed back on the
+	// assistant message so thinking-mode providers can reconstruct the chain.
+	// Empty string is omitted to stay byte-identical with non-reasoning turns.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // ContentPart is one element of a multimodal message content array (OpenAI shape).
@@ -86,6 +91,11 @@ type ChatRequest struct {
 	Messages []ChatMessage
 	System   string
 	Tools    []ToolSchema
+	// MaxTokens is the output-token budget (OpenAI max_tokens). Mirrors the AI
+	// SDK, which sends max_tokens = maxOutputTokens. The field is only emitted
+	// when > 0; any value < 1 is dropped to avoid the upstream "max_tokens must
+	// be at least 1" rejection that the TS client crashes on.
+	MaxTokens int
 }
 
 // Usage carries token accounting parsed from a provider stream's usage object.

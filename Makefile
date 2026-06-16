@@ -13,13 +13,23 @@ PORT ?= 4182
 HOST ?= 127.0.0.1
 BIN  ?= bin/opencode-go
 
-.PHONY: help build run run-real test test-race vet fmt fmt-check check tidy clean tui kill
+.PHONY: help build build-sdk build-wrapper sdk-smoke run run-real test test-race vet fmt fmt-check check tidy clean tui kill
 
 help: ## Print available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build binary to $(BIN)
 	go build -o $(BIN) ./cmd/opencode-go
+
+build-sdk: build-wrapper ## Build Go server + SDK wrapper as bin/opencode
+
+build-wrapper: build ## Install wrapper as bin/opencode (expects TS CLI as opencode-ts for TUI path)
+	cp scripts/opencode-wrapper bin/opencode
+	chmod +x bin/opencode
+
+sdk-smoke: build-sdk ## Run SDK smoke test when /tmp/sdk-extract/package is available
+	@if [ ! -d tests/sdk-smoke/node_modules ] || [ ! -f tests/sdk-smoke/package-lock.json ]; then npm install --no-audit --no-fund --prefix tests/sdk-smoke; fi
+	OPENCODE_USE_GO_SERVER=1 node --preserve-symlinks tests/sdk-smoke/sdk-smoke.mjs
 
 run: build ## Build + serve with mock provider (foreground)
 	OPENCODE_GO_MOCK=1 $(BIN) serve --hostname $(HOST) --port $(PORT)

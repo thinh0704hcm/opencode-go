@@ -28,10 +28,21 @@ func (s *Server) handleMCPConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleMCPDisconnect serves POST /mcp/{name}/disconnect.
 func (s *Server) handleMCPDisconnect(w http.ResponseWriter, r *http.Request) {
-	_ = r.PathValue("name")
+	name := r.PathValue("name")
+	s.tools.Unregister(name + "_")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"disconnected": true,
+		"name": name,
 	})
+}
+
+// handleMCPAdd serves POST /mcp.
+func (s *Server) handleMCPAdd(w http.ResponseWriter, r *http.Request) {
+	s.handleTUIOK(w, r)
+}
+
+// handleMCPAuthRemove serves DELETE /mcp/{name}/auth.
+func (s *Server) handleMCPAuthRemove(w http.ResponseWriter, r *http.Request) {
+	s.handleTUIOK(w, r)
 }
 
 // handleMCPAuth serves POST /mcp/{name}/auth.

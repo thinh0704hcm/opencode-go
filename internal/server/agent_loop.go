@@ -35,6 +35,9 @@ func (s *Server) chatHistory(sessionID, currentUserMsgID string, currentTexts []
 
 	out := make([]provider.ChatMessage, 0, len(msgs))
 	for _, msg := range msgs {
+		if msg.Info.Hidden {
+			continue
+		}
 		role := msg.Info.Role
 		if role != "user" && role != "assistant" {
 			continue
@@ -141,13 +144,31 @@ func joinTexts(texts []string) string {
 	return sb.String()
 }
 
-func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsgID, modelID string, texts []string, images []string, callerSystem string, agent Agent) string {
-	messages := s.chatHistory(sessionID, userMsgID, texts, images)
+func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsgID, modelID string, texts []string, images []string, callerSystem string, agent Agent, prebuiltMessages ...[]provider.ChatMessage) string {
+	var messages []provider.ChatMessage
+	if len(prebuiltMessages) > 0 && prebuiltMessages[0] != nil {
+		messages = prebuiltMessages[0]
+	} else {
+		messages = s.chatHistory(sessionID, userMsgID, texts, images)
+	}
 
 	sb, err := tool.New(s.workdir)
 	if err != nil {
-		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": err.Error()}))
+		s.bus.Publish(event.NewSessionError(sessionID, map[string]any{
+			"name": "UnknownError",
+			"data": map[string]any{"message": err.Error()},
+		}))
 		return ""
+	}
+
+	// Use the actual provider/model from modelID (which may be "providerID/modelID").
+	providerID := s.configuredProviderID
+	if providerID == "" {
+		providerID = s.provider.ID()
+	}
+	if idx := strings.Index(modelID, "/"); idx > 0 && idx < len(modelID)-1 {
+		providerID = modelID[:idx]
+		modelID = modelID[idx+1:]
 	}
 
 	// commitLen tracks how many entries in messages were present at the start of
@@ -159,7 +180,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 	var prevInput, prevOutput int64
 
 	for {
-		s.bus.Publish(event.NewSessionNextStepStarted(sessionID, messageID, agent.Name, modelID, s.provider.ID()))
+		s.bus.Publish(event.NewSessionNextStepStarted(sessionID, messageID, agent.Name, modelID, providerID))
 		stepStartInput := prevInput
 		stepStartOutput := prevOutput
 
@@ -212,7 +233,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				if attempt < maxStreamRetries-1 && len(messages) == commitLen {
 					continue
 				}
-				s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(err.Error())}))
+				s.bus.Publish(event.NewSessionError(sessionID, map[string]any{
+					"name": "UnknownError",
+					"data": map[string]any{"message": scrubError(err.Error())},
+				}))
 				return ""
 			}
 
@@ -261,7 +285,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				if attempt < maxStreamRetries-1 && len(messages) == commitLen {
 					continue
 				}
-				s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(streamErr.Error())}))
+				s.bus.Publish(event.NewSessionError(sessionID, map[string]any{
+					"name": "UnknownError",
+					"data": map[string]any{"message": scrubError(streamErr.Error())},
+				}))
 				return ""
 			}
 			break // stream completed successfully
@@ -321,7 +348,38 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		for _, call := range calls {
 			var toolInput map[string]any
 			_ = json.Unmarshal(call.Input, &toolInput)
-			
+
+			isSubtask := call.Name == "delegate" || call.Name == "task"
+
+			if isSubtask {
+				prompt, _ := toolInput["prompt"].(string)
+				desc, _ := toolInput["description"].(string)
+				agentName, _ := toolInput["agent"].(string)
+				if agentName == "" {
+					agentName = "build"
+				}
+				modelStr, _ := toolInput["model"].(string)
+				// Use the session's actual providerID/modelID for the part display.
+				// If the caller specified an override model, parse just the model part.
+				partProviderID := providerID
+				partModelID := modelID
+				if modelStr != "" {
+					if idx := strings.Index(modelStr, "/"); idx > 0 && idx < len(modelStr)-1 {
+						partProviderID = modelStr[:idx]
+						partModelID = modelStr[idx+1:]
+					} else {
+						partModelID = modelStr
+					}
+				}
+				
+				part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, partProviderID, partModelID, "")
+				s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
+				
+				// We ALSO create a standard tool part so state machines understand this is a running operation.
+				// By convention, tools that spawn subtasks shouldn't bypass the tool lifecycle entirely.
+				// The prompt says: "In internal/server/agent_loop.go, stop bypassing normal ToolPart lifecycle for delegate/task. Treat them as normal tools for state tracking: running -> completed/error via AppendToolPart, publish existing tool events with SDK-required fields if event structs support it."
+			}
+
 			s.bus.Publish(event.NewSessionNextToolInputStarted(sessionID, messageID, call.ID, call.Name))
 			s.bus.Publish(event.NewSessionNextToolInputEnded(sessionID, messageID, call.ID, string(call.Input)))
 			s.bus.Publish(event.NewSessionNextToolCalled(sessionID, messageID, call.ID, call.Name, toolInput))
@@ -337,8 +395,17 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				continue
 			}
 
-			if needsPermission(s.tools, call.Name) && !s.perms.IsAllowed(sessionID, call.Name) {
-				preq := s.perms.Ask("per_"+call.ID, sessionID, call.Name)
+			// For sub-sessions (delegate/task), permSessID is the parent session's
+			// ID. This lets us inherit "always allow" grants and show permission
+			// dialogs on the parent's TUI panel rather than the invisible sub-session.
+			permSessID := permSessionIDFromCtx(ctx)
+			if permSessID == "" {
+				permSessID = sessionID
+			}
+			if needsPermission(s.tools, call.Name) &&
+				!s.perms.IsAllowed(sessionID, call.Name) &&
+				!s.perms.IsAllowed(permSessID, call.Name) {
+				preq := s.perms.Ask("per_"+call.ID, permSessID, call.Name)
 				// Emit permission.asked after building requestObj below. The TUI expects
 				// properties.request.always, not a bare Request.
 				// Also emit permission.updated with a Permission-shaped object so
@@ -356,25 +423,34 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				}
 				requestObj := map[string]any{
 					"id":         preq.ID,
-					"type":       call.Name,
-					"tool":       call.Name,
+					"sessionID":  permSessID,
 					"permission": call.Name,
-					"pattern":    pattern,
-					"always":     []any{},        // TUI reads request.always.length — MUST be an array
-					"patterns":   []any{pattern}, // real PermissionRequest uses a patterns array
-					"sessionID":  sessionID,
-					"messageID":  messageID,
-					"callID":     call.ID,
-					"title":      "Allow tool: " + call.Name,
+					"patterns":   []any{pattern},
 					"metadata":   map[string]any{},
-					"call":       map[string]any{"id": call.ID, "tool": call.Name, "name": call.Name, "input": toolInput},
-					"time":       map[string]any{"created": time.Now().UnixMilli()},
+					"always":     []any{},
+					"tool": map[string]any{
+						"messageID": messageID,
+						"callID":    call.ID,
+					},
 				}
-				askObj := map[string]any{"id": preq.ID, "request": requestObj}
-				for k, v := range requestObj {
-					askObj[k] = v
-				}
-				s.bus.Publish(event.NewPermissionAsked(askObj))
+				s.bus.Publish(event.NewPermissionAsked(requestObj))
+
+				s.bus.Publish(event.Event{
+					ID:   event.NewID("evt"),
+					Type: "permission.v2.asked",
+					Properties: map[string]any{
+						"id":        preq.ID,
+						"sessionID": permSessID,
+						"action":    call.Name,
+						"resources": []string{pattern},
+						"metadata":  map[string]any{},
+						"source": map[string]any{
+							"type":      "tool",
+							"messageID": messageID,
+							"callID":    call.ID,
+						},
+					},
+				})
 
 				permObj := map[string]any{
 					"id":       preq.ID,
@@ -385,13 +461,24 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				// Keep legacy top-level fields for older clients while satisfying
 				// opencode 1.16 TUI's permission.request.always access.
 				for k, v := range requestObj {
-					permObj[k] = v
+					if k != "tool" {
+						permObj[k] = v
+					}
 				}
 				s.bus.Publish(event.NewPermissionUpdated(permObj))
 				reply := s.perms.Wait(ctx, preq, permTimeout)
-				s.bus.Publish(event.NewPermissionReplied(sessionID, preq.ID, reply))
+				s.bus.Publish(event.NewPermissionReplied(permSessID, preq.ID, reply))
+				s.bus.Publish(event.Event{
+					ID:   event.NewID("evt"),
+					Type: "permission.v2.replied",
+					Properties: map[string]any{
+						"sessionID": permSessID,
+						"requestID": preq.ID,
+						"reply":     reply,
+					},
+				})
 				if reply == "always" {
-					s.perms.Allow(sessionID, call.Name)
+					s.perms.Allow(permSessID, call.Name)
 				}
 				if reply == "reject" {
 					out := "permission denied"
@@ -410,8 +497,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			} else {
 				s.bus.Publish(event.NewSessionNextToolSuccess(sessionID, messageID, call.ID, out))
 			}
+			
 			p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, status, toolInput, out)
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+
 			s.store.PersistSession(sessionID) // checkpoint: survive a kill mid-turn
 			messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
 		}

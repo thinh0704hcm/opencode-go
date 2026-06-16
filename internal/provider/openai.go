@@ -47,6 +47,9 @@ type chatCompletionsRequest struct {
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	Tools         []chatTool     `json:"tools,omitempty"`
+	// MaxTokens is omitted when 0 so non-budgeted turns stay byte-identical and
+	// invalid (< 1) budgets never reach the upstream.
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 type streamOptions struct {
@@ -78,6 +81,13 @@ type sseChunk struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
+	// Error is set by some proxies (e.g. 9Router) when a backend fails mid-stream.
+	// Without this field the error JSON would be silently dropped as an empty chunk.
+	Error *struct {
+		Message string `json:"message"`
+		Code    any    `json:"code"`
+		Type    string `json:"type"`
+	} `json:"error"`
 }
 
 type sseToolCallDelta struct {
@@ -109,6 +119,14 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 	}
 	msgs = append(msgs, req.Messages...)
 
+	// Clamp the output budget: emit only a valid (>= 1) max_tokens. A value < 1
+	// is dropped (omitempty) rather than forwarded, which is exactly the bug
+	// that makes the upstream return "max_tokens must be at least 1".
+	maxTokens := req.MaxTokens
+	if maxTokens < 1 {
+		maxTokens = 0
+	}
+
 	var tools []chatTool
 	if len(req.Tools) > 0 {
 		tools = make([]chatTool, 0, len(req.Tools))
@@ -128,7 +146,7 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 		}
 	}
 
-	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools})
+	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools, MaxTokens: maxTokens})
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +260,15 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 			var chunk sseChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue // tolerate non-standard keepalive lines
+			}
+
+			// Surface mid-stream errors from proxies (e.g. 9Router backend failure).
+			if chunk.Error != nil && chunk.Error.Message != "" {
+				select {
+				case out <- ChatChunk{Err: fmt.Errorf("provider error: %s", chunk.Error.Message)}:
+				case <-ctx.Done():
+				}
+				return
 			}
 
 			// A usage object usually arrives on the final chunk, which may carry

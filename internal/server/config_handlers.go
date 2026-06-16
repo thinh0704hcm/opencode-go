@@ -26,6 +26,11 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleConfigUpdate serves PATCH /config.
+func (s *Server) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	s.handleTUIOK(w, r)
+}
+
 // configProvidersResponse is the GET /config/providers body.
 type configProvidersResponse struct {
 	Providers []provider.ProviderInfo `json:"providers"`
@@ -66,13 +71,20 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 type agentInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Mode        string `json:"mode"`
+	Model       any    `json:"model,omitempty"`
+	Native      bool   `json:"native,omitempty"`
 }
 
 // handleAgent serves GET /agent: the file-based agents loaded via loadAgents,
 // always including the default "build" agent first (architecture §7.2).
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
-	out := []agentInfo{{Name: "build", Description: "The default agent."}}
-	agents := loadAgents(s.workdir)
+	out := []agentInfo{{Name: "build", Description: "The default agent.", Mode: "primary", Native: true}}
+	workdir := directoryOf(r)
+	if workdir == "" {
+		workdir = s.workdir
+	}
+	agents := loadAgents(workdir)
 	names := make([]string, 0, len(agents))
 	for name := range agents {
 		names = append(names, name)
@@ -83,9 +95,25 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		if a.Name == "build" {
 			continue // don't duplicate the default
 		}
-		out = append(out, agentInfo{Name: a.Name, Description: a.Description})
+		mode := a.Mode
+		if mode == "" {
+			mode = "primary"
+		}
+		out = append(out, agentInfo{Name: a.Name, Description: a.Description, Mode: mode, Model: agentModelObject(a.Model)})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func agentModelObject(model string) any {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	idx := strings.Index(model, "/")
+	if idx <= 0 || idx == len(model)-1 {
+		return nil
+	}
+	return map[string]string{"providerID": model[:idx], "modelID": model[idx+1:]}
 }
 
 // secretValueRe flags string VALUES that are themselves secrets regardless of

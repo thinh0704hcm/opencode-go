@@ -620,9 +620,10 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 			if p.State == nil {
 				continue
 			}
-			// Skip generic tool representation for delegate/task if we already emitted a subtask part.
 			if p.Tool == "delegate" || p.Tool == "task" {
-				continue
+				if p.State.Status != "error" {
+					continue
+				}
 			}
 			state := map[string]any{
 				"status":   p.State.Status,
@@ -631,7 +632,7 @@ func (s *Server) mapToV2Message(m session.MessageWithParts) any {
 				"metadata": p.State.Metadata,
 			}
 			if p.State.Status == "error" {
-				state["error"] = p.State.Output
+				state["error"] = p.State.Error
 			} else {
 				state["output"] = p.State.Output
 			}

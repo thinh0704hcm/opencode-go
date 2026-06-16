@@ -70,6 +70,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /path", s.handlePath)
 	mux.HandleFunc("GET /project", s.handleProjectList)
 	mux.HandleFunc("GET /project/current", s.handleProjectCurrent)
+	mux.HandleFunc("GET /project/{id}/directories", s.handleProjectDirectories)
+	mux.HandleFunc("GET /api/reference", s.handleAPIReference)
+	mux.HandleFunc("GET /api/integration", s.handleAPIIntegration)
 	mux.HandleFunc("POST /provider/{id}/oauth/authorize", s.handleProviderOAuthNoop)
 	mux.HandleFunc("POST /provider/{id}/oauth/callback", s.handleProviderOAuthNoop)
 	mux.HandleFunc("GET /provider/auth", s.handleProviderAuth)
@@ -107,6 +110,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /experimental/resource", s.handleExperimentalResource)
 	mux.HandleFunc("GET /experimental/workspace", s.handleExperimentalWorkspace)
 	mux.HandleFunc("GET /experimental/workspace/status", s.handleExperimentalWorkspaceStatus)
+	mux.HandleFunc("POST /experimental/session/{id}/background", s.handleExperimentalSessionBackground)
 
 	// TUI control long-poll + log sink.
 	mux.HandleFunc("GET /tui/control/next", s.handleTUIControlNext)
@@ -123,6 +127,38 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /tui/publish", s.handleTUIPublish)
 	mux.HandleFunc("POST /instance/dispose", s.handleTUIOK)
 	mux.HandleFunc("POST /log", s.handleLog)
+
+	// SDK Drop-in: Missing v1 routes
+	mux.HandleFunc("PATCH /config", s.handleConfigUpdate)
+	mux.HandleFunc("POST /mcp", s.handleMCPAdd)
+	mux.HandleFunc("PUT /auth/{id}", s.handleAuthSet)
+	mux.HandleFunc("DELETE /mcp/{name}/auth", s.handleMCPAuthRemove)
+
+	// SDK Drop-in: Missing v2 global routes
+	mux.HandleFunc("GET /global/config", s.handleGlobalConfigGet)
+	mux.HandleFunc("PATCH /global/config", s.handleGlobalConfigUpdate)
+	mux.HandleFunc("POST /global/dispose", s.handleTUIOK)
+	mux.HandleFunc("POST /global/upgrade", s.handleTUIOK)
+	mux.HandleFunc("DELETE /auth/{providerID}", s.handleAuthRemove)
+	// PUT /auth/{providerID} is covered by PUT /auth/{id} above
+
+	// SDK Drop-in: Missing experimental stubs
+	mux.HandleFunc("GET /experimental/console/orgs", s.handleExperimentalConsoleOrgs)
+	mux.HandleFunc("POST /experimental/console/switch", s.handleTUIOK)
+	mux.HandleFunc("GET /experimental/session", s.handleExperimentalSessionList)
+	mux.HandleFunc("POST /experimental/control-plane/move-session", s.handleTUIOK)
+	mux.HandleFunc("GET /experimental/workspace/adapter", s.handleExperimentalWorkspaceAdapter)
+	mux.HandleFunc("POST /experimental/workspace", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/workspace/sync-list", s.handleTUIOK)
+	mux.HandleFunc("DELETE /experimental/workspace/{id}", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/workspace/warp", s.handleTUIOK)
+	mux.HandleFunc("GET /experimental/worktree", s.handleExperimentalWorktreeList)
+	mux.HandleFunc("POST /experimental/worktree", s.handleTUIOK)
+	mux.HandleFunc("DELETE /experimental/worktree", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/worktree/reset", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/project/{projectID}/copy", s.handleTUIOK)
+	mux.HandleFunc("DELETE /experimental/project/{projectID}/copy", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/project/{projectID}/copy/refresh", s.handleTUIOK)
 
 	// v2 API
 	mux.HandleFunc("GET /api/health", s.handleV2Health)

@@ -1,0 +1,282 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/opencode-go/opencode-go/internal/event"
+	"github.com/opencode-go/opencode-go/internal/provider"
+	"github.com/opencode-go/opencode-go/internal/session"
+	"github.com/opencode-go/opencode-go/internal/tool"
+)
+
+// maxAgentIterations bounds the provider<->tool loop so a misbehaving model can
+// never spin forever (the whole point of this design vs. the Node pathology).
+const maxAgentIterations = 16
+
+// permTimeout is how long a mutating tool call waits for a permission reply
+// before the gate default-denies.
+const permTimeout = 90 * time.Second
+
+// runAgentLoop drives the bounded, permission-gated tool-calling loop against an
+// ALREADY-CREATED assistant message. The caller is responsible for publishing
+// the assistant message + busy status beforehand and for finishGeneration +
+// session.idle afterward; this method ONLY performs the provider+tool iteration,
+// emitting text/reasoning deltas and tool parts.
+// chatHistory builds the provider-visible conversation history for the session.
+// Earlier opencode-go sent only the current user message, causing every TUI turn
+// to forget the previous one ("i am thinh" -> "who am i?" => "User"). Keep the
+// history compact and provider-safe: completed assistant text + user text, with
+// images only on the newest user turn.
+func (s *Server) chatHistory(sessionID string, currentTexts []string, currentImages []string) []provider.ChatMessage {
+	msgs, ok := s.store.Messages(sessionID)
+	if !ok || len(msgs) == 0 {
+		return []provider.ChatMessage{{Role: "user", Content: provider.MultimodalContent(joinTexts(currentTexts), currentImages)}}
+	}
+
+	out := make([]provider.ChatMessage, 0, len(msgs))
+	for i, msg := range msgs {
+		role := msg.Info.Role
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		if role == "assistant" && msg.Info.Time.Completed == nil {
+			continue
+		}
+
+		text := partsText(msg.Parts, "text")
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+
+		content := provider.TextContent(text)
+		if role == "user" && i == len(msgs)-1 {
+			// Preserve images for the active prompt only. Historical images are not
+			// re-read/re-encoded here.
+			content = provider.MultimodalContent(text, currentImages)
+		}
+		out = append(out, provider.ChatMessage{Role: role, Content: content})
+	}
+
+	if len(out) == 0 || out[len(out)-1].Role != "user" {
+		out = append(out, provider.ChatMessage{Role: "user", Content: provider.MultimodalContent(joinTexts(currentTexts), currentImages)})
+	}
+	return out
+}
+
+func partsText(parts []session.Part, typ string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Type != typ || p.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(p.Text)
+	}
+	return b.String()
+}
+
+func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, modelID string, texts []string, images []string, callerSystem string, agent Agent) string {
+	messages := s.chatHistory(sessionID, texts, images)
+
+	sb, err := tool.New(s.workdir)
+	if err != nil {
+		s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": err.Error()}))
+		return ""
+	}
+
+	for iter := 0; iter < maxAgentIterations; iter++ {
+		req := provider.ChatRequest{
+			Model:     modelID,
+			Messages:  messages,
+			System:    combineSystem(buildSystemPrompt(s.workdir, agent.Prompt), callerSystem),
+			Tools:     toolSchemas(s.tools, agent.toolAllowed),
+			MaxTokens: s.maxTokens,
+		}
+
+		stream, err := s.provider.StreamChat(ctx, req)
+		if err != nil {
+			s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(err.Error())}))
+			return ""
+		}
+
+		var calls []provider.ToolCall
+		var finishReason string
+		var reasoning strings.Builder
+		for chunk := range stream {
+			if chunk.Err != nil {
+				s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": scrubError(chunk.Err.Error())}))
+				continue
+			}
+			if chunk.TextDelta != "" {
+				s.emitDelta(sessionID, messageID, "text", chunk.TextDelta)
+			}
+			if chunk.ReasoningDelta != "" {
+				reasoning.WriteString(chunk.ReasoningDelta)
+				s.emitDelta(sessionID, messageID, "reasoning", chunk.ReasoningDelta)
+			}
+			if chunk.ToolCall != nil {
+				calls = append(calls, *chunk.ToolCall)
+			}
+			if chunk.Usage != nil {
+				// Record token accounting on the assistant message. Last usage
+				// chunk wins for a multi-step turn (each step's final chunk
+				// carries cumulative usage from the provider).
+				s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total)
+			}
+			if chunk.FinishReason != "" {
+				finishReason = chunk.FinishReason
+			}
+		}
+
+		// No tool calls: the model produced its final text turn.
+		if len(calls) == 0 {
+			return finishReason
+		}
+
+		// OpenAI protocol: the assistant message carrying the tool_calls MUST
+		// precede the matching tool result messages. Append it before executing
+		// the calls so the next turn sees a valid sequence.
+		if len(calls) > 0 {
+			tcs := make([]provider.ChatToolCall, 0, len(calls))
+			for _, c := range calls {
+				tcs = append(tcs, provider.ChatToolCall{
+					ID:       c.ID,
+					Type:     "function",
+					Function: provider.ChatToolCallFunction{Name: c.Name, Arguments: string(c.Input)},
+				})
+			}
+			// Mirror the AI SDK openai-compatible builder: when the turn produced
+			// reasoning, echo it as reasoning_content on the assistant message
+			// that carries the tool_calls. Providers that reject the field are
+			// handled by the provider's strip toggle.
+			messages = append(messages, provider.ChatMessage{Role: "assistant", ToolCalls: tcs, ReasoningContent: reasoning.String()})
+		}
+
+		for _, call := range calls {
+			var toolInput map[string]any
+			_ = json.Unmarshal(call.Input, &toolInput)
+			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", toolInput, "")
+			s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
+
+			if !agent.toolAllowed(call.Name) {
+				out := "tool not allowed for this agent: " + call.Name
+				p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)
+				s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+				messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
+				continue
+			}
+
+			if needsPermission(s.tools, call.Name) && !s.perms.IsAllowed(sessionID, call.Name) {
+				preq := s.perms.Ask("per_"+call.ID, sessionID, call.Name)
+				// Emit permission.asked after building requestObj below. The TUI expects
+				// properties.request.always, not a bare Request.
+				// Also emit permission.updated with a Permission-shaped object so
+				// the opencode 1.16.0 TUI (which listens for permission.updated)
+				// renders an approve prompt. id MUST equal preq.ID so the TUI's
+				// reply routes back to the gate.
+				pattern := string(call.Input)
+				var args map[string]any
+				if json.Unmarshal(call.Input, &args) == nil {
+					if v, ok := args["command"].(string); ok && v != "" {
+						pattern = v
+					} else if v, ok := args["path"].(string); ok && v != "" {
+						pattern = v
+					}
+				}
+				requestObj := map[string]any{
+					"id":        preq.ID,
+					"type":      call.Name,
+					"pattern":   pattern,
+					"always":    []any{},        // TUI reads request.always.length — MUST be an array
+					"patterns":  []any{pattern}, // real PermissionRequest uses a patterns array
+					"sessionID": sessionID,
+					"messageID": messageID,
+					"callID":    call.ID,
+					"title":     "Allow tool: " + call.Name,
+					"metadata":  map[string]any{},
+					"time":      map[string]any{"created": time.Now().UnixMilli()},
+				}
+				askObj := map[string]any{"id": preq.ID, "request": requestObj}
+				for k, v := range requestObj {
+					askObj[k] = v
+				}
+				s.bus.Publish(event.NewPermissionAsked(askObj))
+
+				permObj := map[string]any{
+					"id":       preq.ID,
+					"status":   "pending",
+					"request":  requestObj,
+					"response": nil,
+				}
+				// Keep legacy top-level fields for older clients while satisfying
+				// opencode 1.16 TUI's permission.request.always access.
+				for k, v := range requestObj {
+					permObj[k] = v
+				}
+				s.bus.Publish(event.NewPermissionUpdated(permObj))
+				reply := s.perms.Wait(ctx, preq, permTimeout)
+				s.bus.Publish(event.NewPermissionReplied(sessionID, preq.ID, reply))
+				if reply == "always" {
+					s.perms.Allow(sessionID, call.Name)
+				}
+				if reply == "reject" {
+					out := "permission denied"
+					p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)
+					s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+					messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
+					continue
+				}
+			}
+
+			out, isError := executeToolCall(ctx, s.tools, sb, call)
+			status := "completed"
+			if isError {
+				status = "error"
+			}
+			p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, status, toolInput, out)
+			s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+			messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
+		}
+		// Loop continues: the next provider turn sees the tool results.
+	}
+
+	// Exhausted the iteration budget without a final text turn.
+	s.bus.Publish(event.NewSessionError(sessionID, map[string]string{"message": "max tool iterations reached"}))
+	return ""
+}
+
+// combineSystem appends a caller-supplied system string after the built-in
+// base prompt (matching how opencode appends env/instructions after the base
+// prompt). Returns base unchanged when extra is empty.
+func combineSystem(base, extra string) string {
+	if extra == "" {
+		return base
+	}
+	return base + "\n\n" + extra
+}
+
+// scrubError redacts secrets that some gateways echo back inside 4xx error
+// bodies before the message is broadcast to every SSE subscriber. It strips
+// bearer tokens and sk-/AIza style API keys and caps the length to avoid
+// dumping huge response bodies.
+var (
+	scrubBearerRe = regexp.MustCompile(`(?i)bearer\s+\S+`)
+	scrubSkRe     = regexp.MustCompile(`sk-[A-Za-z0-9_\-]{8,}`)
+	scrubAizaRe   = regexp.MustCompile(`AIza[0-9A-Za-z_\-]{20,}`)
+)
+
+func scrubError(msg string) string {
+	msg = scrubBearerRe.ReplaceAllString(msg, "Bearer ***")
+	msg = scrubSkRe.ReplaceAllString(msg, "sk-***")
+	msg = scrubAizaRe.ReplaceAllString(msg, "AIza***")
+	if len(msg) > 500 {
+		msg = msg[:500]
+	}
+	return msg
+}

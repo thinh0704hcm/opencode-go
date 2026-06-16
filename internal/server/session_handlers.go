@@ -144,6 +144,13 @@ func (s *Server) handleSessionChildren(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, children)
 }
 
+// handleExperimentalSessionBackground serves POST /experimental/session/{id}/background.
+// Real opencode detaches synchronous subagents to the background; we return 200
+// so the TUI doesn't see a 404 and can continue interacting with the parent.
+func (s *Server) handleExperimentalSessionBackground(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+}
+
 // handleSessionAbort serves POST /session/{id}/abort. It drains any pending
 // generation tasks and cancels the currently in-flight turn via the per-session
 // cancel registry. The processQueue loop will naturally emit idle events when

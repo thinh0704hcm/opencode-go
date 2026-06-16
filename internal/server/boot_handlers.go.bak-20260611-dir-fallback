@@ -1,0 +1,164 @@
+package server
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/opencode-go/opencode-go/internal/config"
+	"github.com/opencode-go/opencode-go/internal/provider"
+)
+
+// directoryParam returns the optional ?directory=<cwd> query value, falling back
+// to the server process working directory when the param is empty.
+func directoryParam(r *http.Request) string {
+	if dir := r.URL.Query().Get("directory"); dir != "" {
+		return dir
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return ""
+}
+
+// pathResponse is the GET /path body: the resolved home/state/config locations
+// plus the active worktree/directory.
+type pathResponse struct {
+	Home      string `json:"home"`
+	State     string `json:"state"`
+	Config    string `json:"config"`
+	Worktree  string `json:"worktree"`
+	Directory string `json:"directory"`
+}
+
+// handlePath serves GET /path. home/state/config are derived from the OS user
+// home dir; worktree and directory both reflect the ?directory= value (or the
+// server cwd fallback).
+func (s *Server) handlePath(w http.ResponseWriter, r *http.Request) {
+	dir := directoryParam(r)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+
+	writeJSON(w, http.StatusOK, pathResponse{
+		Home:      home,
+		State:     filepath.Join(home, ".local", "state", "opencode"),
+		Config:    filepath.Join(home, ".config", "opencode"),
+		Worktree:  dir,
+		Directory: dir,
+	})
+}
+
+// projectTime carries the created/updated millisecond timestamps.
+type projectTime struct {
+	Created int64 `json:"created"`
+	Updated int64 `json:"updated"`
+}
+
+// projectResponse is the GET /project/current body.
+type projectResponse struct {
+	ID        string      `json:"id"`
+	Worktree  string      `json:"worktree"`
+	Time      projectTime `json:"time"`
+	Sandboxes []any       `json:"sandboxes"`
+}
+
+// handleProjectCurrent serves GET /project/current. worktree = ?directory=; id
+// is the base name of the worktree (or "global" when empty); both timestamps
+// use the current time in milliseconds.
+func (s *Server) handleProjectCurrent(w http.ResponseWriter, r *http.Request) {
+	worktree := directoryParam(r)
+
+	id := filepath.Base(worktree)
+	if worktree == "" || id == "." || id == string(filepath.Separator) {
+		id = "global"
+	}
+
+	nowMS := time.Now().UnixMilli()
+
+	writeJSON(w, http.StatusOK, projectResponse{
+		ID:        id,
+		Worktree:  worktree,
+		Time:      projectTime{Created: nowMS, Updated: nowMS},
+		Sandboxes: []any{},
+	})
+}
+
+// authMethod is one accepted auth method for a provider in GET /provider/auth.
+type authMethod struct {
+	Type  string `json:"type"`
+	Label string `json:"label"`
+}
+
+// handleProviderAuth serves GET /provider/auth: a map keyed by each provider id
+// from the registry, with the API-key auth method as the value.
+func (s *Server) handleProviderAuth(w http.ResponseWriter, r *http.Request) {
+	reg := provider.BuildRegistry(config.Load(directoryParam(r)))
+
+	out := map[string][]authMethod{}
+	for _, p := range reg.Providers {
+		out[p.ID] = []authMethod{{Type: "api", Label: "API Key"}}
+	}
+
+	writeJSON(w, http.StatusOK, out)
+}
+
+// consoleResponse is the GET /experimental/console body.
+type consoleResponse struct {
+	ConsoleManagedProviders []any `json:"consoleManagedProviders"`
+	SwitchableOrgCount      int   `json:"switchableOrgCount"`
+}
+
+// handleExperimentalConsole serves GET /experimental/console.
+func (s *Server) handleExperimentalConsole(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, consoleResponse{
+		ConsoleManagedProviders: []any{},
+		SwitchableOrgCount:      0,
+	})
+}
+
+// vcsResponse is the GET /vcs body.
+type vcsResponse struct {
+	Branch        *string `json:"branch"`
+	DefaultBranch *string `json:"default_branch"`
+}
+
+// handleCommand serves GET /command -> [].
+func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+// handleFormatter serves GET /formatter -> [].
+func (s *Server) handleFormatter(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+// handleLSP serves GET /lsp -> [].
+func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+// handleSessionStatus serves GET /session/status -> {}.
+func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// handleExperimentalResource serves GET /experimental/resource -> {}.
+func (s *Server) handleExperimentalResource(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// handleExperimentalWorkspace serves GET /experimental/workspace -> [].
+func (s *Server) handleExperimentalWorkspace(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+// handleExperimentalWorkspaceStatus serves GET /experimental/workspace/status.
+// The TS TUI reads `response.data` and calls `.map` on it, so `data` MUST be an
+// array (an empty object/`{}` makes the TUI throw "(...).map is not a function").
+func (s *Server) handleExperimentalWorkspaceStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}

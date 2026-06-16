@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/config"
@@ -14,6 +17,12 @@ import (
 // to the server process working directory when the param is empty.
 func directoryParam(r *http.Request) string {
 	if dir := r.URL.Query().Get("directory"); dir != "" {
+		return dir
+	}
+	if dir := r.URL.Query().Get("path"); dir != "" {
+		return dir
+	}
+	if dir := os.Getenv("OPENCODE_GO_WORKDIR"); dir != "" {
 		return dir
 	}
 	if cwd, err := os.Getwd(); err == nil {
@@ -64,6 +73,21 @@ type projectResponse struct {
 	Worktree  string      `json:"worktree"`
 	Time      projectTime `json:"time"`
 	Sandboxes []any       `json:"sandboxes"`
+}
+
+func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
+	worktree := directoryParam(r)
+	id := filepath.Base(worktree)
+	if worktree == "" || id == "." || id == string(filepath.Separator) {
+		id = "global"
+	}
+	nowMS := time.Now().UnixMilli()
+	writeJSON(w, http.StatusOK, []projectResponse{{
+		ID:        id,
+		Worktree:  worktree,
+		Time:      projectTime{Created: nowMS, Updated: nowMS},
+		Sandboxes: []any{},
+	}})
 }
 
 // handleProjectCurrent serves GET /project/current. worktree = ?directory=; id
@@ -126,9 +150,159 @@ type vcsResponse struct {
 	DefaultBranch *string `json:"default_branch"`
 }
 
-// handleCommand serves GET /command -> [].
+type commandInfo struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Agent       any      `json:"agent"`
+	Model       any      `json:"model"`
+	Source      string   `json:"source"`
+	Template    string   `json:"template"`
+	Hints       []string `json:"hints"`
+}
+
+// handleCommand serves GET /command, loading global + project markdown commands
+// and inline opencode.json command entries. Ctrl+P depends on this list being
+// stable across TUI restarts.
 func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []any{})
+	workdir := directoryOf(r)
+	if workdir == "" {
+		workdir = s.workdir
+	}
+	writeJSON(w, http.StatusOK, loadCommands(workdir))
+}
+
+func loadCommands(workdir string) []commandInfo {
+	byName := map[string]commandInfo{}
+	for _, dir := range commandDirs(workdir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			cmd, ok := parseCommandFile(filepath.Join(dir, e.Name()))
+			if !ok {
+				continue
+			}
+			if cmd.Name == "" {
+				cmd.Name = strings.TrimSuffix(e.Name(), ".md")
+			}
+			cmd.Source = "command"
+			if cmd.Hints == nil {
+				cmd.Hints = []string{"$ARGUMENTS"}
+			}
+			byName[cmd.Name] = cmd
+		}
+	}
+
+	cfg := config.Load(workdir)
+	if m, ok := cfg.Raw["command"].(map[string]any); ok {
+		for name, raw := range m {
+			obj, _ := raw.(map[string]any)
+			cmd := commandInfo{Name: name, Source: "config", Agent: nil, Model: nil, Hints: []string{"$ARGUMENTS"}}
+			if v, ok := obj["description"].(string); ok {
+				cmd.Description = v
+			}
+			if v, ok := obj["template"].(string); ok {
+				cmd.Template = v
+			}
+			if v, ok := obj["prompt"].(string); ok && cmd.Template == "" {
+				cmd.Template = v
+			}
+			if v, ok := obj["agent"]; ok {
+				cmd.Agent = v
+			}
+			if v, ok := obj["model"]; ok {
+				cmd.Model = v
+			}
+			byName[name] = cmd
+		}
+	}
+
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]commandInfo, 0, len(names))
+	for _, name := range names {
+		out = append(out, byName[name])
+	}
+	return out
+}
+
+func commandDirs(workdir string) []string {
+	dirs := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".config", "opencode", "command"), filepath.Join(home, ".config", "opencode", "commands"))
+	}
+	if workdir != "" {
+		dirs = append(dirs, filepath.Join(workdir, ".opencode", "command"), filepath.Join(workdir, ".opencode", "commands"))
+	}
+	return dirs
+}
+
+func parseCommandFile(path string) (commandInfo, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return commandInfo{}, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var cmd commandInfo
+	cmd.Agent = nil
+	cmd.Model = nil
+	inFront := false
+	frontDone := false
+	lineNo := 0
+	var body strings.Builder
+	for sc.Scan() {
+		line := sc.Text()
+		lineNo++
+		trimmed := strings.TrimSpace(line)
+		if lineNo == 1 && trimmed == "---" {
+			inFront = true
+			continue
+		}
+		if inFront && !frontDone {
+			if trimmed == "---" {
+				frontDone = true
+				continue
+			}
+			parseCommandFrontLine(&cmd, line)
+			continue
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	cmd.Template = strings.TrimSpace(body.String())
+	return cmd, cmd.Template != "" || cmd.Description != ""
+}
+
+func parseCommandFrontLine(cmd *commandInfo, line string) {
+	idx := strings.Index(line, ":")
+	if idx < 0 {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(line[:idx]))
+	val := strings.Trim(strings.TrimSpace(line[idx+1:]), `"'`)
+	switch key {
+	case "name":
+		cmd.Name = val
+	case "description":
+		cmd.Description = val
+	case "agent":
+		if val != "" {
+			cmd.Agent = val
+		}
+	case "model":
+		if val != "" {
+			cmd.Model = val
+		}
+	}
 }
 
 // handleFormatter serves GET /formatter -> [].
@@ -156,7 +330,62 @@ func (s *Server) handleExperimentalWorkspace(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, []any{})
 }
 
-// handleExperimentalWorkspaceStatus serves GET /experimental/workspace/status -> {}.
+// handleExperimentalWorkspaceStatus serves GET /experimental/workspace/status.
+// The TS TUI reads `response.data` and calls `.map` on it, so `data` MUST be an
+// array (an empty object/`{}` makes the TUI throw "(...).map is not a function").
 func (s *Server) handleExperimentalWorkspaceStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+func (s *Server) handleProviderOAuthNoop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// SDK Drop-in stubs
+
+func (s *Server) handleGlobalConfigGet(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Load(s.workdir)
+	out := cfg.Defaulted()
+	maskSecretsDeep(out)
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGlobalConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	s.handleTUIOK(w, r)
+}
+
+func (s *Server) handleExperimentalConsoleOrgs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+func (s *Server) handleExperimentalSessionList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "cursor": nil})
+}
+
+func (s *Server) handleExperimentalWorkspaceAdapter(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+func (s *Server) handleExperimentalWorktreeList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+func (s *Server) handleProjectDirectories(w http.ResponseWriter, r *http.Request) {
+	// 404 stub for GET /project/{id}/directories
+	// Return current directory as main
+	workdir := s.workdir
+	if dirQuery := r.URL.Query().Get("directory"); dirQuery != "" && filepath.IsAbs(dirQuery) {
+		workdir = dirQuery
+	}
+	writeJSON(w, http.StatusOK, []map[string]any{
+		{"directory": workdir, "type": "main"},
+	})
+}
+
+func (s *Server) handleAPIReference(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+}
+
+func (s *Server) handleAPIIntegration(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
 }

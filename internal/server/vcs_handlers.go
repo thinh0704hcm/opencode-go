@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,9 +162,24 @@ func (s *Server) handleVCSDiffRaw(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
 	dir := directoryParam(r)
 
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, vcsApplyResponse{Applied: false, Error: err.Error()})
+		return
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: "empty request body"})
+		return
+	}
+
 	var req vcsApplyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: "invalid request body"})
+		return
+	}
+
+	if strings.TrimSpace(req.Diff) == "" {
+		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
 		return
 	}
 
@@ -178,4 +194,36 @@ func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
+}
+
+type vcsDiffStatEntry struct {
+	File      string `json:"file"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+}
+
+func gitDiffStat(dir string) ([]vcsDiffStatEntry, error) {
+	out, _, err := runGit(dir, nil, "diff", "--numstat", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	var entries []vcsDiffStatEntry
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		adds, _ := strconv.Atoi(fields[0])
+		dels, _ := strconv.Atoi(fields[1])
+		entries = append(entries, vcsDiffStatEntry{
+			File:      fields[2],
+			Additions: adds,
+			Deletions: dels,
+		})
+	}
+	return entries, nil
 }

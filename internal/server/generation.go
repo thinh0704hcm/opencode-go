@@ -28,7 +28,7 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 // runGenerationSync runs the full generation pipeline (start turn, loop,
 // finish) and blocks until the assistant message is completed. It returns the
 // final {info, parts} for the assistant message.
-func (s *Server) runGenerationSync(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
+func (s *Server) runGenerationSync(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(sessionID, cancel)
 	defer func() {
@@ -36,22 +36,46 @@ func (s *Server) runGenerationSync(sessionID, parentID, providerID, modelID stri
 		cancel()
 	}()
 
-	return s.runGenerationSyncCtx(ctx, sessionID, parentID, providerID, modelID, texts, images, system, agent)
+	return s.runGenerationSyncCtx(ctx, sessionID, parentID, resumeID, providerID, modelID, texts, images, system, agent)
 }
 
 // runGenerationSyncCtx executes the core of runGenerationSync using a provided context.
-func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
+func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
 	// 1. Create the assistant message
-	asst, ok := s.store.NewAssistantMessage(sessionID, parentID, providerID, modelID, agent.Name, "chat")
-	if !ok {
-		return session.MessageWithParts{}, false
+	mode := agent.Mode
+	if mode == "" {
+		mode = "build"
+	}
+	if providerID == "" {
+		providerID = s.configuredProviderID
+	}
+	
+	var asst session.MessageWithParts
+	var ok bool
+	if resumeID != "" {
+		asst, ok = s.store.GetMessage(sessionID, resumeID)
+		if !ok || asst.Info.Role != "assistant" {
+			return session.MessageWithParts{}, false
+		}
+	} else {
+		asst, ok = s.store.NewAssistantMessage(sessionID, parentID, providerID, modelID, agent.Name, mode)
+		if !ok {
+			return session.MessageWithParts{}, false
+		}
 	}
 
 	// 2. Publish message.updated(assistant) so the TUI sees the empty bubble
-	s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
-	// Publish the auto-created step-start part so the TUI renders the step marker.
-	if len(asst.Parts) > 0 {
-		s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
+	if resumeID == "" {
+		s.bus.Publish(event.NewMessageUpdated(sessionID, asst.Info, false))
+		// Publish the auto-created step-start part so the TUI renders the step marker.
+		if len(asst.Parts) > 0 {
+			s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[0], time.Now().UnixMilli()))
+		}
+	} else {
+		// Just publish an auto-created step-start part for the resume
+		if len(asst.Parts) > 0 {
+			s.bus.Publish(event.NewMessagePartUpdated(sessionID, asst.Parts[len(asst.Parts)-1], time.Now().UnixMilli()))
+		}
 	}
 
 	// 3. Run the agent loop
@@ -87,9 +111,9 @@ func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, 
 
 // runGenerationAsync runs the generation pipeline in a background goroutine,
 // publishing the full sequence of SSE events. It returns immediately.
-func (s *Server) runGenerationAsync(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent) {
+func (s *Server) runGenerationAsync(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent) {
 	go func() {
-		s.runGenerationSync(sessionID, parentID, providerID, modelID, texts, images, system, agent)
+		s.runGenerationSync(sessionID, parentID, resumeID, providerID, modelID, texts, images, system, agent)
 	}()
 }
 
@@ -97,7 +121,7 @@ func (s *Server) runGenerationAsync(sessionID, parentID, providerID, modelID str
 // queue is currently empty, it starts the turn immediately. It returns the
 // admitted sequence number and true if admitted. It returns false if
 // delivery=="steer" and the session is already busy.
-func (s *Server) startOrQueue(sessionID, parentID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string) (int64, bool) {
+func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string) (int64, bool) {
 	s.sesMu.Lock()
 	defer s.sesMu.Unlock()
 
@@ -119,6 +143,7 @@ func (s *Server) startOrQueue(sessionID, parentID, providerID, modelID string, t
 
 	task := &generationTask{
 		parentID:   parentID,
+		resumeID:   resumeID,
 		providerID: providerID,
 		modelID:    modelID,
 		texts:      texts,
@@ -158,12 +183,13 @@ func (s *Server) processQueue(w *sessionWork) {
 		// Publish busy status
 		s.bus.Publish(event.NewSessionStatus(w.sessionID, map[string]string{"type": "busy"}))
 
-		s.runGenerationSync(w.sessionID, task.parentID, task.providerID, task.modelID, task.texts, task.images, task.system, task.agent)
+		s.runGenerationSync(w.sessionID, task.parentID, task.resumeID, task.providerID, task.modelID, task.texts, task.images, task.system, task.agent)
 	}
 }
 
 type generationTask struct {
 	parentID   string
+	resumeID   string // ID of an existing assistant message to resume (overrides parentID)
 	providerID string
 	modelID    string
 	texts      []string

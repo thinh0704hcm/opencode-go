@@ -1,0 +1,81 @@
+#!/usr/bin/env sh
+set -eu
+
+dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+
+resolve_path() {
+  path=$1
+  if command -v readlink >/dev/null 2>&1; then
+    resolved=$(readlink -f "$path" 2>/dev/null || true)
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$path" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+self=$(resolve_path "$0" || true)
+
+find_bin() {
+  override=$1
+  name=$2
+  if [ -n "$override" ]; then
+    if [ -x "$override" ]; then
+      printf '%s\n' "$override"
+      return 0
+    else
+      return 1
+    fi
+  fi
+  if [ -x "$dir/$name" ]; then
+    printf '%s\n' "$dir/$name"
+    return 0
+  fi
+  path=$(command -v "$name" 2>/dev/null || true)
+  if [ -n "$path" ] && [ -x "$path" ]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+  return 1
+}
+
+exec_bin() {
+  bin=$1
+  shift
+  resolved=$(resolve_path "$bin" || true)
+  if [ -n "$self" ] && [ -n "$resolved" ] && [ "$resolved" = "$self" ]; then
+    echo "opencode wrapper: refusing to exec itself ($bin resolves to $self)" >&2
+    exit 126
+  fi
+  exec "$bin" "$@"
+}
+
+cmd=${1:-}
+case "$cmd" in
+  serve|models)
+    if [ "${OPENCODE_USE_GO_SERVER:-0}" = "1" ] || [ "${OPENCODE_GO_SERVER:-0}" = "1" ] || [ "${OPENCODE_FORCE_GO:-0}" = "1" ]; then
+      go_bin=$(find_bin "${OPENCODE_GO_BIN:-}" opencode-go) || {
+        echo "opencode wrapper: missing Go binary 'opencode-go' (set OPENCODE_GO_BIN or put opencode-go beside wrapper/in PATH)" >&2
+        exit 127
+      }
+      exec_bin "$go_bin" "$@"
+    else
+      ts_bin=$(find_bin "${OPENCODE_TS_BIN:-}" opencode-ts) || {
+        echo "opencode wrapper: TUI path requires original TypeScript binary 'opencode-ts' (set OPENCODE_TS_BIN or put opencode-ts beside wrapper/in PATH)" >&2
+        exit 127
+      }
+      exec_bin "$ts_bin" "$@"
+    fi
+    ;;
+  *)
+    ts_bin=$(find_bin "${OPENCODE_TS_BIN:-}" opencode-ts) || {
+      echo "opencode wrapper: TUI path requires original TypeScript binary 'opencode-ts' (set OPENCODE_TS_BIN or put opencode-ts beside wrapper/in PATH)" >&2
+      exit 127
+    }
+    exec_bin "$ts_bin" "$@"
+    ;;
+esac

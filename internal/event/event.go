@@ -27,6 +27,7 @@ const (
 	TypeSessionIdle        = "session.idle"
 	TypeSessionError       = "session.error"
 	TypeSessionStatus      = "session.status"
+	TypeSessionCreated     = "session.created"
 	TypeSessionUpdated     = "session.updated"
 	TypeSessionDeleted     = "session.deleted"
 	TypePermissionAsked    = "permission.asked"
@@ -113,6 +114,12 @@ type SessionStatusProps struct {
 	Status    any    `json:"status"`
 }
 
+// SessionCreatedProps is the properties shape for session.created.
+type SessionCreatedProps struct {
+	SessionID string `json:"sessionID"`
+	Info      any    `json:"info"`
+}
+
 // SessionUpdatedProps is the properties shape for session.updated.
 type SessionUpdatedProps struct {
 	SessionID string `json:"sessionID"`
@@ -182,6 +189,12 @@ func NewSessionIdle(sessionID string) Event {
 // NewSessionStatus creates a session.status event (e.g. {type:"busy"}).
 func NewSessionStatus(sessionID string, status any) Event {
 	return Event{ID: newID("evt"), Type: TypeSessionStatus, Properties: SessionStatusProps{SessionID: sessionID, Status: status}}
+}
+
+// NewSessionCreated creates a session.created event carrying the Session info.
+func NewSessionCreated(sessionID string, info any) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionCreated,
+		Properties: SessionCreatedProps{SessionID: sessionID, Info: info}}
 }
 
 // NewSessionUpdated creates a session.updated event carrying the Session info.
@@ -264,11 +277,10 @@ func (e Event) GuaranteedDelivery() bool {
 }
 
 type SessionNextPromptProps struct {
-	Timestamp   int64  `json:"timestamp"`
-	SessionID   string `json:"sessionID"`
-	MessageID   string `json:"messageID"`
-	AdmittedSeq int64  `json:"admittedSeq"`
-	Prompt      struct {
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	Prompt    struct {
 		Text string `json:"text"`
 	} `json:"prompt"`
 	Delivery string `json:"delivery"` // "steer" | "queue"
@@ -282,6 +294,7 @@ type SessionNextStepStartedProps struct {
 	Model              struct {
 		ID         string `json:"id"`
 		ProviderID string `json:"providerID"`
+		Variant    string `json:"variant,omitempty"`
 	} `json:"model"`
 }
 
@@ -374,10 +387,11 @@ type SessionNextToolCalledProps struct {
 }
 
 type SessionNextToolSuccessProps struct {
-	Timestamp          int64  `json:"timestamp"`
-	SessionID          string `json:"sessionID"`
-	AssistantMessageID string `json:"assistantMessageID"`
-	CallID             string `json:"callID"`
+	Timestamp          int64          `json:"timestamp"`
+	SessionID          string         `json:"sessionID"`
+	AssistantMessageID string         `json:"assistantMessageID"`
+	CallID             string         `json:"callID"`
+	Structured         map[string]any `json:"structured"`
 	Content            []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -427,15 +441,14 @@ func NewSessionNextPrompted(sessionID, messageID, text, delivery string) Event {
 	}
 }
 
-func NewSessionNextPromptAdmitted(sessionID, messageID, text, delivery string, seq int64) Event {
+func NewSessionNextPromptAdmitted(sessionID, messageID, text, delivery string) Event {
 	return Event{
 		ID:   newID("evt"),
 		Type: TypeSessionNextPromptAdmitted,
 		Properties: SessionNextPromptProps{
-			Timestamp:   time.Now().UnixMilli(),
-			SessionID:   sessionID,
-			MessageID:   messageID,
-			AdmittedSeq: seq,
+			Timestamp: time.Now().UnixMilli(),
+			SessionID: sessionID,
+			MessageID: messageID,
 			Prompt: struct {
 				Text string `json:"text"`
 			}{Text: text},
@@ -472,6 +485,7 @@ func NewSessionNextStepStarted(sessionID, assistantMsgID, agentName, modelID, pr
 			Model: struct {
 				ID         string `json:"id"`
 				ProviderID string `json:"providerID"`
+				Variant    string `json:"variant,omitempty"`
 			}{ID: modelID, ProviderID: providerID},
 		},
 	}
@@ -503,7 +517,7 @@ func NewSessionNextStepFailed(sessionID, assistantMsgID, errType, errMsg string)
 			Error: struct {
 				Type    string `json:"type"`
 				Message string `json:"message"`
-			}{Type: errType, Message: errMsg},
+			}{Type: "unknown", Message: errMsg},
 		},
 	}
 }
@@ -659,6 +673,7 @@ func NewSessionNextToolSuccess(sessionID, assistantMsgID, callID, output string)
 			SessionID:          sessionID,
 			AssistantMessageID: assistantMsgID,
 			CallID:             callID,
+			Structured:         map[string]any{},
 			Content: []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -682,7 +697,7 @@ func NewSessionNextToolFailed(sessionID, assistantMsgID, callID, errMsg string) 
 			Error: struct {
 				Type    string `json:"type"`
 				Message string `json:"message"`
-			}{Type: "tool_execution_error", Message: errMsg},
+			}{Type: "unknown", Message: errMsg},
 			Provider: struct {
 				Executed bool `json:"executed"`
 			}{Executed: true},

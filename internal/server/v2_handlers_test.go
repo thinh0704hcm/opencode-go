@@ -219,13 +219,25 @@ func TestV2MapSubtaskAndToolParts(t *testing.T) {
 		}
 	}
 
+	// Append an error tool part
+	srv.store.AppendToolPart(sid, asstMsg.(session.MessageWithParts).Info.ID, "delegate", "call-err", "error", map[string]any{"prompt": "fail"}, "error output")
+
+	// Fetch again
+	msgs, _ = srv.store.Messages(sid)
+	for _, m := range msgs {
+		if m.Info.Role == "assistant" {
+			asstMsg = m
+			break
+		}
+	}
+
 	// Map to V2
 	mapped := srv.mapToV2Message(asstMsg.(session.MessageWithParts)).(map[string]any)
 	content := mapped["content"].([]any)
 	
-	// Verify content length is 2 (step-start + subtask), tool should be hidden
-	if len(content) != 2 {
-		t.Fatalf("expected 2 content parts, got %d: %v", len(content), content)
+	// Verify content length is 3 (step-start + subtask + error tool)
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts, got %d: %v", len(content), content)
 	}
 
 	subtask := content[1].(map[string]any)
@@ -237,6 +249,21 @@ func TestV2MapSubtaskAndToolParts(t *testing.T) {
 	}
 	if subtask["sessionID"] != "target-123" {
 		t.Errorf("expected target sessionID, got %v", subtask["sessionID"])
+	}
+
+	toolPart := content[2].(map[string]any)
+	if toolPart["type"] != "tool" {
+		t.Errorf("expected type tool, got %v", toolPart["type"])
+	}
+	if toolPart["tool"] != "delegate" {
+		t.Errorf("expected tool delegate, got %v", toolPart["tool"])
+	}
+	state := toolPart["state"].(map[string]any)
+	if state["status"] != "error" {
+		t.Errorf("expected status error, got %v", state["status"])
+	}
+	if state["error"] != "error output" {
+		t.Errorf("expected error output, got %v", state["error"])
 	}
 	
 	// Verify user message shape

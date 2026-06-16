@@ -225,3 +225,38 @@ func TestEditRefusesAmbiguousMatch(t *testing.T) {
 		t.Fatalf("got %q", string(got))
 	}
 }
+
+func TestPlanToolsSaveRead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmp := t.TempDir()
+	sb, err := New(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewDefaultRegistry()
+	if _, err := runTool(t, r, "plan_save", sb, map[string]string{"content": "# Plan\n- test"}); err != nil {
+		t.Fatalf("plan_save: %v", err)
+	}
+	res, err := runTool(t, r, "plan_read", sb, map[string]string{})
+	if err != nil {
+		t.Fatalf("plan_read: %v", err)
+	}
+	if !strings.Contains(res.Output, "# Plan") || !strings.Contains(res.Output, "test") {
+		t.Fatalf("plan_read output = %q", res.Output)
+	}
+}
+
+func TestWorktreeBranchValidation(t *testing.T) {
+	valid := []string{"feature/test", "bugfix_123", "release-1.0"}
+	invalid := []string{"", "../escape", "bad..branch", "bad branch", "bad@{x", "bad/", "-bad"}
+	for _, name := range valid {
+		if !validBranchName(name) {
+			t.Fatalf("validBranchName(%q) = false", name)
+		}
+	}
+	for _, name := range invalid {
+		if validBranchName(name) {
+			t.Fatalf("validBranchName(%q) = true", name)
+		}
+	}
+}

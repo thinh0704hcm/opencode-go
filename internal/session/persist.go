@@ -73,6 +73,16 @@ func (s *Store) Load() error {
 		sort.SliceStable(msgs, func(i, j int) bool {
 			return msgs[i].Info.Time.Created < msgs[j].Info.Time.Created
 		})
+		// Zombie-close: mark any assistant message that was never completed
+		// (time.completed == nil) so the TUI doesn't lock input waiting for a
+		// generation that will never finish (server was killed mid-turn).
+		nowMs := nowMS()
+		for _, m := range msgs {
+			if m.Info.Role == "assistant" && m.Info.Time.Completed == nil {
+				m.Info.Time.Completed = &nowMs
+				m.Info.Finish = "aborted"
+			}
+		}
 		s.messages[sess.ID] = msgs
 	}
 	return nil

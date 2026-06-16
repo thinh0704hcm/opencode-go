@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // readTool reads a single file's contents.
@@ -218,7 +219,8 @@ func (webFetchTool) Execute(ctx context.Context, input json.RawMessage, sb *Sand
 		return Result{}, err
 	}
 	req.Header.Set("User-Agent", "opencode/1.0 WebFetch")
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return Result{}, err
 	}
@@ -238,4 +240,3 @@ func (webFetchTool) Execute(ctx context.Context, input json.RawMessage, sb *Sand
 	}
 	return Result{Output: text}, nil
 }
-

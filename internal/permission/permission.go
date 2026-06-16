@@ -2,7 +2,9 @@ package permission
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"time"
 )
@@ -27,11 +29,25 @@ type Store struct {
 	mu       sync.Mutex
 	requests map[string]*Request // requestID -> request
 	allowed  map[string]bool     // sessionID\x00toolName -> always-allowed
+	path     string
 }
 
 // NewStore creates an empty permission store.
-func NewStore() *Store {
-	return &Store{requests: make(map[string]*Request), allowed: make(map[string]bool)}
+func NewStore() *Store { return NewStoreWithPath("") }
+
+// NewStoreWithPath creates a store and loads persisted grants from the given path.
+func NewStoreWithPath(path string) *Store {
+	s := &Store{requests: make(map[string]*Request), allowed: make(map[string]bool), path: path}
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var loaded map[string]bool
+			if json.Unmarshal(data, &loaded) == nil {
+				s.allowed = loaded
+			}
+		}
+	}
+	return s
 }
 
 // Allow records a per-session, per-tool "always" grant so subsequent calls of
@@ -39,7 +55,21 @@ func NewStore() *Store {
 func (s *Store) Allow(sessionID, tool string) {
 	s.mu.Lock()
 	s.allowed[sessionID+"\x00"+tool] = true
+	tmp := make(map[string]bool, len(s.allowed))
+	for k, v := range s.allowed {
+		tmp[k] = v
+	}
+	path := s.path
 	s.mu.Unlock()
+	if path != "" {
+		data, err := json.Marshal(tmp)
+		if err == nil {
+			// atomic write via temp file
+			tmpPath := path + ".tmp"
+			_ = os.WriteFile(tmpPath, data, 0o644)
+			_ = os.Rename(tmpPath, path)
+		}
+	}
 }
 
 // IsAllowed reports whether the tool was previously always-allowed for the session.

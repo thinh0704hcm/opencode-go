@@ -23,6 +23,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Healthy: true, Version: Version})
 }
 
+// handleAuthSet serves PUT /auth/{id} and PUT /auth/{providerID}.
+func (s *Server) handleAuthSet(w http.ResponseWriter, r *http.Request) {
+	s.handleTUIOK(w, r)
+}
+
+// handleAuthRemove serves DELETE /auth/{providerID}.
+func (s *Server) handleAuthRemove(w http.ResponseWriter, r *http.Request) {
+	s.handleTUIOK(w, r)
+}
+
 // sessionCreateRequest is the POST /session body (all optional).
 type sessionCreateRequest struct {
 	ParentID string `json:"parentID"`
@@ -39,6 +49,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	dir := directoryParam(r)
 	sess := s.store.CreateSession(req.ParentID, req.Title, dir)
 	s.store.PersistSession(sess.ID)
+	s.bus.Publish(event.NewSessionCreated(sess.ID, sess))
 	writeJSON(w, http.StatusOK, sess)
 }
 
@@ -140,9 +151,18 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 		agent.Name = "build"
 	}
 
+	reqProviderID := req.Model.ProviderID
+	if reqProviderID == "" {
+		reqProviderID = s.configuredProviderID
+	}
+	reqModelID := req.Model.ModelID
+	if reqModelID == "" {
+		reqModelID = modelID
+	}
+
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, agent.Name, texts)
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, reqProviderID, reqModelID, agent.Name, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -152,14 +172,14 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishUserMessage(id, userMsg)
 
-	seq, ok := s.startOrQueue(id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent, "")
+	_, ok = s.startOrQueue(id, userMsg.Info.ID, "", reqProviderID, reqModelID, texts, images, req.System, agent, "")
 	if !ok {
 		s.store.RemoveMessage(id, userMsg.Info.ID)
 		writeJSON(w, http.StatusConflict, map[string]any{"_tag": "ConflictError", "message": "session is busy", "resource": "session"})
 		return
 	}
 	s.bus.Publish(event.NewSessionNextPrompted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
-	s.bus.Publish(event.NewSessionNextPromptAdmitted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue", seq))
+	s.bus.Publish(event.NewSessionNextPromptAdmitted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -201,9 +221,18 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		agent.Name = "build"
 	}
 
+	reqProviderID := req.Model.ProviderID
+	if reqProviderID == "" {
+		reqProviderID = s.configuredProviderID
+	}
+	reqModelID := req.Model.ModelID
+	if reqModelID == "" {
+		reqModelID = modelID
+	}
+
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
-	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, req.Model.ProviderID, req.Model.ModelID, agent.Name, texts)
+	userMsg, ok := s.store.AppendUserMessage(id, req.MessageID, reqProviderID, reqModelID, agent.Name, texts)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -212,13 +241,14 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		s.bus.Publish(event.NewSessionUpdated(id, updated))
 	}
 	s.publishUserMessage(id, userMsg)
+	s.bus.Publish(event.NewSessionNextPrompted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
+	s.bus.Publish(event.NewSessionNextPromptAdmitted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(id, cancel)
 	defer func() { s.clearCancel(id); cancel() }()
 
-	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "busy"}))
-	asst, ok := s.runGenerationSyncCtx(ctx, id, userMsg.Info.ID, req.Model.ProviderID, modelID, texts, images, req.System, agent)
+	asst, ok := s.runGenerationSyncCtx(ctx, id, userMsg.Info.ID, "", reqProviderID, modelID, texts, images, req.System, agent)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

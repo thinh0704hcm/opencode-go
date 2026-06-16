@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
+	"github.com/opencode-go/opencode-go/internal/event"
 	"io"
 	"net/http"
 	"time"
-	"github.com/opencode-go/opencode-go/internal/event"
 )
 
 // tuiControlNextTimeout bounds the GET /tui/control/next long-poll. On timeout

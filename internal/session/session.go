@@ -11,6 +11,9 @@ type Time struct {
 // Session mirrors the schema fields the bot + TUI read (architecture §2.2).
 type Session struct {
 	ID        string      `json:"id"` // ses_*
+	Slug      string      `json:"slug"`
+	Version   string      `json:"version"`
+	ProjectID string      `json:"projectID"`
 	ParentID  string      `json:"parentID,omitempty"`
 	Title     string      `json:"title"`
 	Directory string      `json:"directory"`
@@ -52,17 +55,18 @@ type Message struct {
 	Role       string      `json:"role"`
 	SessionID  string      `json:"sessionID"`
 	Time       Time        `json:"time"`
-	Agent      string      `json:"agent,omitempty"`
-	ParentID   string      `json:"parentID,omitempty"`
+	Agent      string      `json:"agent"`
+	ParentID   string      `json:"parentID"`
 	ModelID    string      `json:"modelID,omitempty"`
 	ProviderID string      `json:"providerID,omitempty"`
 	Mode       string      `json:"mode,omitempty"`
-	Finish     string      `json:"finish,omitempty"`
-	Cost       float64     `json:"cost"`
+	Finish     string      `json:"-"`
+	Cost       *float64    `json:"cost,omitempty"`
 	Tokens     *Tokens     `json:"tokens,omitempty"`
 	Path       *MsgPath    `json:"path,omitempty"`
 	Model      *MsgModel   `json:"model,omitempty"`   // user message model
 	Summary    *MsgSummary `json:"summary,omitempty"` // user message summary
+	Hidden     bool        `json:"hidden,omitempty"`  // sub-agent inline messages excluded from history
 }
 
 // MsgModel is the user message's {providerID, modelID} block.
@@ -78,21 +82,33 @@ type MsgSummary struct {
 
 // Part is a single content part of a message.
 type Part struct {
-	ID        string     `json:"id"` // prt_*
-	MessageID string     `json:"messageID"`
-	SessionID string     `json:"sessionID"`
-	Type      string     `json:"type"` // "text" | "reasoning" | "tool" | "step-start" | "step-finish"
-	Text      string     `json:"text,omitempty"`
-	Tool      string     `json:"tool,omitempty"`
-	CallID    string     `json:"callID,omitempty"`
-	State     *PartState `json:"state,omitempty"`
+	ID          string     `json:"id"` // prt_*
+	MessageID   string     `json:"messageID"`
+	SessionID   string     `json:"sessionID"`
+	Type        string     `json:"type"` // "text" | "reasoning" | "tool" | "step-start" | "step-finish" | "subtask"
+	Text        string     `json:"text,omitempty"`
+	Tool        string     `json:"tool,omitempty"`
+	CallID      string     `json:"callID,omitempty"`
+	Prompt      string     `json:"prompt,omitempty"`
+	Description string     `json:"description,omitempty"`
+	Agent       string     `json:"agent,omitempty"`
+	TargetSessionID string `json:"targetSessionID,omitempty"`
+	Model       *PartModel `json:"model,omitempty"`
+	Command     string     `json:"command,omitempty"`
+	State       *PartState `json:"state,omitempty"`
 	// Time is set on assistant text parts (start, optional end); real user text
 	// parts carry no time, so this stays omitempty to preserve that asymmetry.
 	Time *PartTime `json:"time,omitempty"`
 	// Reason/Cost/Tokens are set on step-finish parts.
-	Reason string  `json:"reason,omitempty"`
-	Cost   float64 `json:"cost,omitempty"`
-	Tokens *Tokens `json:"tokens,omitempty"`
+	Reason string   `json:"reason,omitempty"`
+	Cost   *float64 `json:"cost,omitempty"`
+	Tokens *Tokens  `json:"tokens,omitempty"`
+}
+
+// PartModel holds provider and model IDs for subtask parts.
+type PartModel struct {
+	ProviderID string `json:"providerID"`
+	ModelID    string `json:"modelID"`
 }
 
 // PartTime holds a part's start (and optional end) timestamps in epoch ms.
@@ -110,6 +126,7 @@ type PartState struct {
 	Status   string         `json:"status"` // pending|running|completed|error
 	Input    map[string]any `json:"input,omitempty"`
 	Output   string         `json:"output,omitempty"`
+	Error    string         `json:"error,omitempty"`
 	Title    string         `json:"title"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 	Time     *PartStateTime `json:"time,omitempty"`
@@ -117,8 +134,8 @@ type PartState struct {
 
 // PartStateTime holds a tool-part's start (and optional end) timestamps in ms.
 type PartStateTime struct {
-	Start int64 `json:"start"`
-	End   int64 `json:"end,omitempty"`
+	Start int64  `json:"start"`
+	End   *int64 `json:"end,omitempty"`
 }
 
 // MessageWithParts is the {info, parts} shape returned by GET .../message.

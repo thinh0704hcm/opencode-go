@@ -48,6 +48,14 @@ func Load(directory string) *Config {
 		merged = mergeMaps(merged, m)
 	}
 
+	// highest-precedence overlay from SDK / CI callers
+	if raw := os.Getenv("OPENCODE_CONFIG_CONTENT"); raw != "" {
+		var overlay map[string]any
+		if json.Unmarshal([]byte(raw), &overlay) == nil {
+			merged = mergeMaps(merged, overlay)
+		}
+	}
+
 	// Snapshot before interpolation so the provider registry can recover the
 	// {env:VAR} NAMES for env[].
 	rawNoEnv := deepCopyMap(merged)

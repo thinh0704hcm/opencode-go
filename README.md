@@ -34,6 +34,47 @@ OPENCODE_GO_MODEL=cx/gpt-5.5 \
 | `--hostname` | `127.0.0.1` | Loopback only. Binding a non-loopback host is refused. |
 | `--port` | `4096` | TCP port. |
 
+## Practical hybrid drop-in
+
+This repo supports a practical drop-in path for SDK/server usage while preserving
+the original TypeScript TUI. It does **not** attempt full TUI parity in Go.
+
+Build the Go server and wrapper:
+
+```sh
+make build-sdk
+export PATH="$(pwd)/bin:$PATH"
+```
+
+`bin/opencode` is a small dispatcher. Because the Go server lacks context/session parity, subtask support, and tool parity compared to the original TypeScript server, the wrapper preserves the TypeScript server by default:
+
+- `OPENCODE_USE_GO_SERVER=1 opencode serve ...` and `OPENCODE_USE_GO_SERVER=1 opencode models ...` exec `opencode-go`.
+- Any other command (or without the opt-in env var) execs the original TS CLI/TUI as `opencode-ts`.
+
+Place the upstream TypeScript CLI on PATH as `opencode-ts`, or set:
+
+```sh
+export OPENCODE_TS_BIN=/path/to/original/opencode
+export OPENCODE_GO_BIN=/path/to/opencode-go   # optional override
+```
+
+Do not overwrite the upstream TS binary silently. Rename/symlink it to
+`opencode-ts` before putting this repo's `bin/opencode` first in PATH.
+
+What works: SDK server startup through `createOpencodeServer()` and v2 client
+calls for the implemented HTTP surface. What delegates: TUI and other non-server
+CLI commands go to the TS CLI.
+
+Smoke test, when an extracted SDK exists at `/tmp/sdk-extract/package`:
+
+```sh
+make sdk-smoke
+```
+
+The smoke test chooses free localhost ports by default. Set
+`OPENCODE_SMOKE_V1_PORT` / `OPENCODE_SMOKE_V2_PORT` to force ports, and set
+`OPENCODE_SMOKE_REQUIRED=1` to make missing SDK extract/deps fail instead of skip.
+
 ## Environment variables
 
 | Var | Purpose |

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,15 +18,21 @@ const maxBuffer = 2 * 1024 * 1024
 
 // Pty is one pseudo-terminal session.
 type Pty struct {
-	ID      string
-	Title   string
-	Command string
-	Created int64 // epoch ms
-	cmd     *exec.Cmd
-	ptmx    *os.File
-	mu      sync.Mutex
-	closed  bool
-	tickets map[string]int64 // one-time connect tickets -> expiry epoch ms
+	ID       string
+	Title    string
+	Command  string
+	Created  int64 // epoch ms
+	Args     []string
+	Workdir  string
+	Status   string
+	ExitCode *int
+	TimedOut bool
+	timeout  *time.Timer
+	cmd      *exec.Cmd
+	ptmx     *os.File
+	mu       sync.Mutex
+	closed   bool
+	tickets  map[string]int64 // one-time connect tickets -> expiry epoch ms
 
 	// Buffered fan-out: a single background reader owns all ptmx reads,
 	// appends to a ring buffer, and copies each chunk to every subscriber.
@@ -38,18 +45,30 @@ type Pty struct {
 
 // Info is the JSON-safe view returned by HTTP handlers.
 type Info struct {
-	ID      string `json:"id"`
-	Title   string `json:"title"`
-	Command string `json:"command"`
-	Created int64  `json:"created"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Command   string   `json:"command"`
+	Created   int64    `json:"created"`
+	Args      []string `json:"args,omitempty"`
+	Workdir   string   `json:"workdir,omitempty"`
+	Status    string   `json:"status"`
+	ExitCode  *int     `json:"exitCode,omitempty"`
+	TimedOut  bool     `json:"timedOut"`
+	LineCount int      `json:"lineCount"`
 }
 
 func (p *Pty) Info() Info {
 	return Info{
-		ID:      p.ID,
-		Title:   p.Title,
-		Command: p.Command,
-		Created: p.Created,
+		ID:        p.ID,
+		Title:     p.Title,
+		Command:   p.Command,
+		Created:   p.Created,
+		Args:      p.Args,
+		Workdir:   p.Workdir,
+		Status:    p.Status,
+		ExitCode:  p.ExitCode,
+		TimedOut:  p.TimedOut,
+		LineCount: p.LineCount(),
 	}
 }
 
@@ -66,6 +85,10 @@ func NewRegistry() *Registry {
 // Create starts a new pty running `command` (default the user's $SHELL or
 // /bin/bash) in `cwd`. Returns the Pty or error.
 func (r *Registry) Create(id, title, command, cwd string) (*Pty, error) {
+	return r.Spawn(id, title, command, nil, cwd, 0)
+}
+
+func (r *Registry) Spawn(id, title, command string, args []string, cwd string, timeoutSeconds int) (*Pty, error) {
 	var cmd *exec.Cmd
 	if command == "" {
 		shell := os.Getenv("SHELL")
@@ -73,6 +96,8 @@ func (r *Registry) Create(id, title, command, cwd string) (*Pty, error) {
 			shell = "/bin/bash"
 		}
 		cmd = exec.Command(shell, "-l")
+	} else if len(args) > 0 {
+		cmd = exec.Command(command, args...)
 	} else {
 		cmd = exec.Command("bash", "-lc", command)
 	}
@@ -88,12 +113,24 @@ func (r *Registry) Create(id, title, command, cwd string) (*Pty, error) {
 	p := &Pty{
 		ID:      id,
 		Title:   title,
-		Command: command,
+		Command: strings.TrimSpace(command + " " + strings.Join(args, " ")),
+		Args:    args,
+		Workdir: cwd,
+		Status:  "running",
 		Created: time.Now().UnixMilli(),
 		cmd:     cmd,
 		ptmx:    ptmx,
 		tickets: make(map[string]int64),
 		subs:    make(map[int]chan []byte),
+	}
+
+	if timeoutSeconds > 0 {
+		p.timeout = time.AfterFunc(time.Duration(timeoutSeconds)*time.Second, func() {
+			p.mu.Lock()
+			p.TimedOut = true
+			p.mu.Unlock()
+			_ = p.Close()
+		})
 	}
 
 	startReader(p)
@@ -121,7 +158,22 @@ func startReader(p *Pty) {
 	go func() {
 		defer func() {
 			if p.cmd != nil {
-				_ = p.cmd.Wait()
+				if err := p.cmd.Wait(); err != nil {
+					if exit, ok := err.(*exec.ExitError); ok {
+						code := exit.ExitCode()
+						p.mu.Lock()
+						p.ExitCode = &code
+						p.mu.Unlock()
+					}
+				} else {
+					code := 0
+					p.mu.Lock()
+					p.ExitCode = &code
+					p.mu.Unlock()
+				}
+				if p.timeout != nil {
+					p.timeout.Stop()
+				}
 			}
 		}()
 		buf := make([]byte, 4096)
@@ -156,6 +208,13 @@ func (p *Pty) closeSubs() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed = true
+	if p.Status == "running" {
+		if p.TimedOut {
+			p.Status = "killed"
+		} else {
+			p.Status = "exited"
+		}
+	}
 	for id, ch := range p.subs {
 		close(ch)
 		delete(p.subs, id)
@@ -290,6 +349,9 @@ func (p *Pty) Close() error {
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 	}
+	if p.timeout != nil {
+		p.timeout.Stop()
+	}
 	if p.ptmx != nil {
 		return p.ptmx.Close()
 	}
@@ -313,4 +375,44 @@ func Shells() []string {
 	add("/bin/bash")
 	add("/bin/sh")
 	return out
+}
+
+func (p *Pty) LineCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.buffer) == 0 {
+		return 0
+	}
+	return strings.Count(string(p.buffer), "\n") + 1
+}
+
+func (p *Pty) ReadLines(offset, limit int) ([]string, int, bool) {
+	p.mu.Lock()
+	raw := string(append([]byte(nil), p.buffer...))
+	p.mu.Unlock()
+	if raw == "" {
+		return nil, 0, false
+	}
+	lines := strings.Split(raw, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	total := len(lines)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := total
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return append([]string(nil), lines[offset:end]...), total, end < total
+}
+
+func (p *Pty) RawBuffer() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return string(append([]byte(nil), p.buffer...))
 }

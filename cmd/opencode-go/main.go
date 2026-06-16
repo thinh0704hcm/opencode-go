@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -82,6 +83,7 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	hostname := fs.String("hostname", "127.0.0.1", "bind hostname (127.0.0.1 only)")
 	port := fs.Int("port", 4096, "bind port")
+	logLevelStr := fs.String("log-level", "info", "log level (debug|info|warn|error)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -92,9 +94,21 @@ func runServe(args []string) error {
 		return fmt.Errorf("refusing to bind non-loopback hostname %q (127.0.0.1 only)", *hostname)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	var level slog.Level
+	switch strings.ToLower(*logLevelStr) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
 
-	prov, model, err := buildProvider(logger)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	prov, model, providerID, err := buildProvider(logger)
 	if err != nil {
 		return err
 	}
@@ -114,15 +128,18 @@ func runServe(args []string) error {
 	}
 
 	srv := server.New(server.Options{
-		Provider: prov,
-		Model:    model,
-		Logger:   logger,
-		Tools:    tool.NewDefaultRegistry(),
-		Workdir:  workdir,
-		DataDir:  dataDir,
+		Provider:             prov,
+		ConfiguredProviderID: providerID,
+		Model:                model,
+		MaxTokens:            envMaxTokens(),
+		Logger:               logger,
+		Tools:                tool.NewDefaultRegistry(),
+		Workdir:              workdir,
+		DataDir:              dataDir,
 	})
 
 	addr := fmt.Sprintf("%s:%d", *hostname, *port)
+	fmt.Fprintf(os.Stdout, "opencode server listening on http://%s\n", addr)
 	logger.Info("opencode-go listening", "addr", addr, "auth", "none (loopback only)")
 
 	errCh := make(chan error, 1)
@@ -149,10 +166,10 @@ func runServe(args []string) error {
 
 // buildProvider constructs the provider from env. MOCK takes precedence when
 // OPENCODE_GO_MOCK=1 so M1 is testable without real tokens.
-func buildProvider(logger *slog.Logger) (provider.Provider, string, error) {
+func buildProvider(logger *slog.Logger) (provider.Provider, string, string, error) {
 	if os.Getenv("OPENCODE_GO_MOCK") == "1" {
 		logger.Info("using MOCK provider (OPENCODE_GO_MOCK=1)")
-		return provider.NewMock(""), "mock", nil
+		return provider.NewMock(""), "mock", "mock", nil
 	}
 
 	baseURL := os.Getenv("OPENCODE_GO_BASE_URL")
@@ -163,10 +180,12 @@ func buildProvider(logger *slog.Logger) (provider.Provider, string, error) {
 		// Model may be "providerID/modelID" or just a model string; the
 		// OpenAI-compatible client only needs the modelID it sends on the wire.
 		modelID := model
+		providerID := "openai"
 		if i := strings.Index(model, "/"); i >= 0 {
+			providerID = model[:i]
 			modelID = model[i+1:]
 		}
-		return provider.NewOpenAI("openai", baseURL, apiKey, modelID, &http.Client{Timeout: 0}), modelID, nil
+		return provider.NewOpenAI("openai", baseURL, apiKey, modelID, &http.Client{Timeout: 0}), modelID, providerID, nil
 	}
 
 	// Env vars unset: try auto-config from the opencode config + auth.json so
@@ -181,9 +200,21 @@ func buildProvider(logger *slog.Logger) (provider.Provider, string, error) {
 	cfg := config.Load(workdir)
 	if cfgBaseURL, cfgAPIKey, providerID, modelID, ok := provider.ResolveDefault(cfg); ok {
 		logger.Info("using provider from opencode config", "provider", providerID, "model", modelID)
-		return provider.NewOpenAI("openai", cfgBaseURL, cfgAPIKey, modelID, &http.Client{Timeout: 0}), modelID, nil
+		return provider.NewOpenAI("openai", cfgBaseURL, cfgAPIKey, modelID, &http.Client{Timeout: 0}), modelID, providerID, nil
 	}
 
 	logger.Warn("no provider configured (set OPENCODE_GO_BASE_URL + OPENCODE_GO_API_KEY, or OPENCODE_GO_MOCK=1, or an opencode config default model); falling back to MOCK")
-	return provider.NewMock(""), "mock", nil
+	return provider.NewMock(""), "mock", "mock", nil
+}
+
+// envMaxTokens reads OPENCODE_GO_MAX_TOKENS as the output-token budget sent as
+// max_tokens. A missing, non-numeric, or < 1 value yields 0 (omit the field),
+// which is the safe default that never trips the upstream "max_tokens must be
+// at least 1" rejection.
+func envMaxTokens() int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("OPENCODE_GO_MAX_TOKENS")))
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
-	"github.com/opencode-go/opencode-go/internal/provider"
 	"github.com/opencode-go/opencode-go/internal/session"
 	"github.com/opencode-go/opencode-go/internal/tool"
 )
@@ -104,9 +103,34 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 		return tool.Result{}, fmt.Errorf("delegate: no parent session in context")
 	}
 
+	// Wait to attach target session ID to the subtask part
+	// We no longer need to lock sesMu and modify a copy.
+	// We will update the store below.
+
 	// Create child session.
 	childSession := s.store.CreateSession(parentSessionID, fmt.Sprintf("Task: %s", agentName), s.workdir)
 	childSessionID := childSession.ID
+	
+	// Update the target session ID in the parent session's store.
+	// We need to find the message ID first.
+	// Find the message ID by getting the last assistant message
+	var msgID string
+	var updatedPart session.Part
+	var ok bool
+	if msgs, found := s.store.Messages(parentSessionID); found {
+		for i := len(msgs)-1; i >= 0; i-- {
+			if msgs[i].Info.Role == "assistant" {
+				msgID = msgs[i].Info.ID
+				break
+			}
+		}
+	}
+	if msgID != "" {
+		updatedPart, ok = s.store.UpdateSubtaskTarget(parentSessionID, msgID, prompt, childSessionID)
+		if ok {
+			s.bus.Publish(event.NewMessagePartUpdated(parentSessionID, updatedPart, time.Now().UnixMilli()))
+		}
+	}
 
 	s.logger.Debug("delegate child run started", "agent", agentName, "model", modelID, "parent_session", parentSessionID, "child_session", childSessionID)
 
@@ -116,14 +140,14 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 	}
 
 	// Create initial message in child session.
-	asst, ok := s.store.NewAssistantMessage(childSessionID, "", s.configuredProviderID, modelID, agent.Name, mode, false)
+	userMsg, ok := s.store.AppendUserMessage(childSessionID, "", s.configuredProviderID, modelID, agent.Name, []string{prompt})
 	if !ok {
-		return tool.Result{}, fmt.Errorf("delegate: failed to create sub-agent message in child session")
+		return tool.Result{}, fmt.Errorf("delegate: failed to create user message in child session")
 	}
 
-	// Build a minimal history for the sub-agent.
-	minimalHistory := []provider.ChatMessage{
-		{Role: "user", Content: provider.TextContent(prompt)},
+	asst, ok := s.store.NewAssistantMessage(childSessionID, userMsg.Info.ID, s.configuredProviderID, modelID, agent.Name, mode, false)
+	if !ok {
+		return tool.Result{}, fmt.Errorf("delegate: failed to create sub-agent message in child session")
 	}
 
 	// Propagate parent's permission grants.
@@ -132,13 +156,34 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 	go func() {
 		defer s.logger.Debug("delegate child run completed", "agent", agentName, "model", modelID, "child_session", childSessionID)
 		
+		s.bus.Publish(event.NewSessionCreated(childSessionID, childSession))
+
 		// Publish initial event to child session.
+		s.bus.Publish(event.NewMessageUpdated(childSessionID, userMsg.Info, false))
+		for _, part := range userMsg.Parts {
+			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, part, time.Now().UnixMilli()))
+		}
+		
 		s.bus.Publish(event.NewMessageUpdated(childSessionID, asst.Info, false))
 		if len(asst.Parts) > 0 {
 			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, asst.Parts[0], time.Now().UnixMilli()))
 		}
 
-		finishReason := s.runAgentLoop(subCtx, childSessionID, asst.Info.ID, "", modelID, []string{prompt}, nil, "", agent, minimalHistory)
+		s.sesMu.Lock()
+		w := s.sesQueue[childSessionID]
+		if w == nil {
+			w = &sessionWork{
+				sessionID: childSessionID,
+				queue:     []*generationTask{},
+			}
+			s.sesQueue[childSessionID] = w
+		}
+		w.running = true
+		s.sesMu.Unlock()
+		
+		s.bus.Publish(event.NewSessionStatus(childSessionID, map[string]string{"type": "busy"}))
+
+		finishReason := s.runAgentLoop(subCtx, childSessionID, asst.Info.ID, userMsg.Info.ID, modelID, []string{prompt}, nil, "", agent)
 
 		reason := finishReason
 		if reason == "" {
@@ -161,6 +206,22 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, sf, time.Now().UnixMilli()))
 		}
 		s.finishGeneration(childSessionID, asst.Info.ID)
+		
+		s.sesMu.Lock()
+		// Re-use existing processQueue draining behavior
+		hasMore := len(w.queue) > 0
+		if !hasMore {
+			w.running = false
+		}
+		s.sesMu.Unlock()
+		
+		if hasMore {
+			// Kick off the next task in the background.
+			go s.processQueue(w)
+		} else {
+			s.bus.Publish(event.NewSessionStatus(childSessionID, map[string]string{"type": "idle"}))
+			s.bus.Publish(event.NewSessionIdle(childSessionID))
+		}
 	}()
 
 	return tool.Result{

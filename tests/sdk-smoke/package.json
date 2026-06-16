@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/sdk": "file:/tmp/sdk-extract/package"
+  }
+}

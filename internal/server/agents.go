@@ -171,3 +171,13 @@ func parseAgentFrontLine(a *Agent, line string) {
 		}
 	}
 }
+
+func agentMode(a Agent) string {
+	if strings.TrimSpace(a.Mode) != "" {
+		return a.Mode
+	}
+	if strings.TrimSpace(a.Name) != "" && strings.TrimSpace(a.Name) != "build" {
+		return a.Name
+	}
+	return "build"
+}

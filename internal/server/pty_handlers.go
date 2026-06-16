@@ -87,5 +87,5 @@ func (s *Server) handlePtyConnectToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ticket := p.IssueTicket()
-	writeJSON(w, http.StatusOK, map[string]string{"ticket": ticket})
+	writeJSON(w, http.StatusOK, map[string]string{"ticket": ticket, "token": ticket})
 }

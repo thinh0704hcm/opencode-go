@@ -160,7 +160,7 @@ func TestEmptyStubShapes(t *testing.T) {
 		path string
 		want string
 	}{
-		{"/command", "[]"},
+		// /command now has a real config/file-backed shape; covered by behavior tests.
 		// /mcp now has a real config-backed shape (M5b); covered by behavior tests.
 		{"/formatter", "[]"},
 		{"/lsp", "[]"},
@@ -171,6 +171,40 @@ func TestEmptyStubShapes(t *testing.T) {
 		if got := getRaw(t, ts.URL, c.path); got != c.want {
 			t.Errorf("%s body = %q, want %q", c.path, got, c.want)
 		}
+	}
+}
+
+func TestBoot404Stubs(t *testing.T) {
+	ts := httptest.NewServer(newTestServer().Handler())
+	defer ts.Close()
+
+	var gotDirs []map[string]any
+	getJSON(t, ts.URL, "/project/test-id/directories", &gotDirs)
+	if len(gotDirs) == 0 || gotDirs[0]["type"] != "main" {
+		t.Errorf("/project/test-id/directories missing main dir: %v", gotDirs)
+	}
+
+	var gotRef map[string]any
+	getJSON(t, ts.URL, "/api/reference", &gotRef)
+	if _, ok := gotRef["data"]; !ok {
+		t.Errorf("/api/reference missing data: %v", gotRef)
+	}
+
+	var gotInt map[string]any
+	getJSON(t, ts.URL, "/api/integration", &gotInt)
+	if _, ok := gotInt["data"]; !ok {
+		t.Errorf("/api/integration missing data: %v", gotInt)
+	}
+}
+
+func TestCommandEndpointReturnsArray(t *testing.T) {
+	ts := httptest.NewServer(newTestServer().Handler())
+	defer ts.Close()
+
+	var got []any
+	getJSON(t, ts.URL, "/command", &got)
+	if got == nil {
+		t.Fatal("/command returned nil, want array")
 	}
 }
 

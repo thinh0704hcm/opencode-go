@@ -4,6 +4,54 @@ import (
 	"testing"
 )
 
+// TestLoadClosesZombieAssistantMessages verifies that assistant messages with
+// time.completed==nil (server killed mid-turn) are closed on Load so the TUI
+// does not lock input waiting for a generation that will never complete.
+func TestLoadClosesZombieAssistantMessages(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore()
+	if err := s.SetPersistDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	sess := s.CreateSession("", "", "")
+	if _, ok := s.AppendUserMessage(sess.ID, "", "", "", "build", []string{"hello"}); !ok {
+		t.Fatal("AppendUserMessage failed")
+	}
+	am, ok := s.NewAssistantMessage(sess.ID, "", "", "", "build", "build")
+	if !ok {
+		t.Fatal("NewAssistantMessage failed")
+	}
+	// Verify the message is NOT completed yet.
+	if am.Info.Time.Completed != nil {
+		t.Fatal("new assistant message should not be completed")
+	}
+	// Persist WITHOUT completing the assistant message (simulates server kill).
+	s.PersistSession(sess.ID)
+
+	// Load into a fresh store — zombie must be closed.
+	s2 := NewStore()
+	if err := s2.SetPersistDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Load(); err != nil {
+		t.Fatal(err)
+	}
+	msgs, ok := s2.Messages(sess.ID)
+	if !ok {
+		t.Fatal("session not loaded")
+	}
+	for _, m := range msgs {
+		if m.Info.Role == "assistant" {
+			if m.Info.Time.Completed == nil {
+				t.Fatal("zombie assistant message was not closed on Load")
+			}
+			if m.Info.Finish != "aborted" {
+				t.Fatalf("expected finish=aborted, got %q", m.Info.Finish)
+			}
+		}
+	}
+}
+
 func TestSessionPersistRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore()
@@ -11,10 +59,10 @@ func TestSessionPersistRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	sess := s.CreateSession("", "My Title", "/work")
-	if _, ok := s.AppendUserMessage(sess.ID, "", "concactao", "cx/gpt-5.5-review", []string{"hello"}); !ok {
+	if _, ok := s.AppendUserMessage(sess.ID, "", "concactao", "cx/gpt-5.5-review", "build", []string{"hello"}); !ok {
 		t.Fatal("append user msg failed")
 	}
-	am, ok := s.NewAssistantMessage(sess.ID, "", "concactao", "cx/gpt-5.5-review")
+	am, ok := s.NewAssistantMessage(sess.ID, "", "concactao", "cx/gpt-5.5-review", "build", "build")
 	if !ok {
 		t.Fatal("new assistant msg failed")
 	}

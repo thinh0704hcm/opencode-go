@@ -26,17 +26,18 @@ const Version = "1.16.0"
 
 // Server holds the runtime dependencies and HTTP lifecycle (architecture §2.1).
 type Server struct {
-	bus       *event.Bus
-	store     *session.Store
-	perms     *permission.Store
-	provider  provider.Provider
-	model     string // default model id passed to the provider
-	maxTokens int    // output-token budget sent as max_tokens (0 = omit)
-	logger    *slog.Logger
-	tools     *tool.Registry
-	mcp       *mcp.Manager
-	workdir   string
-	ptys      *pty.Registry
+	bus                  *event.Bus
+	store                *session.Store
+	perms                *permission.Store
+	provider             provider.Provider
+	configuredProviderID string // user-visible provider alias (e.g., "concactao")
+	model                string // default model id passed to the provider
+	maxTokens            int    // output-token budget sent as max_tokens (0 = omit)
+	logger               *slog.Logger
+	tools                *tool.Registry
+	mcp                  *mcp.Manager
+	workdir              string
+	ptys                 *pty.Registry
 
 	cancelMu sync.Mutex
 	cancels  map[string]context.CancelFunc
@@ -49,13 +50,14 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	Provider  provider.Provider
-	Model     string // default model id
-	MaxTokens int    // output-token budget (max_tokens); <1 means omit
-	Logger    *slog.Logger
-	Tools     *tool.Registry
-	Workdir   string
-	DataDir   string
+	Provider             provider.Provider
+	ConfiguredProviderID string // user-visible provider alias from config
+	Model                string // default model id
+	MaxTokens            int    // output-token budget (max_tokens); <1 means omit
+	Logger               *slog.Logger
+	Tools                *tool.Registry
+	Workdir              string
+	DataDir              string
 }
 
 // New builds a Server with its in-memory bus, store, and permission gate.
@@ -93,16 +95,17 @@ func New(opts Options) *Server {
 			}
 			return ""
 		}()),
-		provider:  opts.Provider,
-		model:     opts.Model,
-		maxTokens: opts.MaxTokens,
-		logger:    logger,
-		tools:     tools,
-		mcp:       mcpMgr,
-		workdir:   workdir,
-		ptys:      pty.NewRegistry(),
-		cancels:   map[string]context.CancelFunc{},
-		sesQueue:  map[string]*sessionWork{},
+		provider:             opts.Provider,
+		configuredProviderID: opts.ConfiguredProviderID,
+		model:                opts.Model,
+		maxTokens:            opts.MaxTokens,
+		logger:               logger,
+		tools:                tools,
+		mcp:                  mcpMgr,
+		workdir:              workdir,
+		ptys:                 pty.NewRegistry(),
+		cancels:              map[string]context.CancelFunc{},
+		sesQueue:             map[string]*sessionWork{},
 	}
 	srv.tools.Register(delegateTool{srv: srv})
 	srv.tools.Register(taskTool{srv: srv})

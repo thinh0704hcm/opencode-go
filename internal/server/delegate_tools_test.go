@@ -43,7 +43,7 @@ func TestDelegateTaskAsync(t *testing.T) {
 		t.Errorf("expected delegate output NOT to contain child transcript")
 	}
 
-	children := srv.store.Children(parentSess.ID)
+	children := srv.store.GetSessionChildren(parentSess.ID)
 	if len(children) != 1 {
 		t.Fatalf("expected 1 child session, got %d", len(children))
 	}
@@ -54,10 +54,26 @@ func TestDelegateTaskAsync(t *testing.T) {
 	}
 	
 	// Wait a bit to let child goroutine finish
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	
-	messages, _ := srv.store.Messages(child.ID)
-	if len(messages) < 1 {
-		t.Errorf("expected child to have messages")
+	messages, ok := srv.store.Messages(child.ID)
+	if !ok {
+		t.Fatal("expected messages in child session")
+	}
+	
+	if len(messages) < 2 {
+		t.Fatalf("expected at least 2 messages (user, assistant), got %d", len(messages))
+	}
+	
+	if messages[0].Info.Role != "user" {
+		t.Errorf("expected first message to be user, got %s", messages[0].Info.Role)
+	}
+	
+	if messages[1].Info.Role != "assistant" {
+		t.Errorf("expected second message to be assistant, got %s", messages[1].Info.Role)
+	}
+	
+	if messages[1].Info.ParentID != messages[0].Info.ID {
+		t.Errorf("expected assistant parentID %q to match user msg ID %q", messages[1].Info.ParentID, messages[0].Info.ID)
 	}
 }

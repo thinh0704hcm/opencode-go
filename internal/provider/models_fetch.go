@@ -15,7 +15,7 @@ import (
 // BuildRegistry can run per-request, so the cache makes the network fetch happen
 // at most once per TTL per (providerID+baseURL) key — keeping /config/providers
 // and /provider fast while still auto-populating models.
-const modelsFetchTTL = 5 * time.Minute
+const modelsFetchTTL = 24 * time.Hour
 
 // versionSuffixRe matches a trailing "/vN" (e.g. "/v1", "/v2") so an already
 // versioned baseURL is left as-is instead of getting a second "/v1".
@@ -23,10 +23,15 @@ var versionSuffixRe = regexp.MustCompile(`/v\d+$`)
 
 // modelModifiers are trailing leaf tokens promoted into the "(A + B)"
 // parenthetical by humanizeModelID (ports the plugin MODIFIERS set).
-var modelModifiers = map[string]bool{
-	"thinking": true,
-	"agentic":  true,
-	"review":   true,
+var modelModifiers = map[string]string{
+	"thinking": "Thinking",
+	"agentic":  "Agentic",
+	"review":   "Review",
+	"none":     "None",
+	"low":      "Low",
+	"medium":   "Medium",
+	"high":     "High",
+	"xhigh":    "xHigh",
 }
 
 // modelAcronyms upper-cases known short tokens during humanization (ports the
@@ -46,7 +51,7 @@ var modelAcronyms = map[string]string{
 
 // cachedModels is one TTL-bounded /v1/models result.
 type cachedModels struct {
-	ids       []string
+	models    []providerModel
 	fetchedAt time.Time
 }
 
@@ -57,37 +62,39 @@ var (
 	modelsCache   = map[string]cachedModels{}
 )
 
-// cachedFetchProviderModels returns the model ids for baseURL, fetching them at
-// most once per modelsFetchTTL per cacheKey. It fails open: on any fetch error
-// it returns an empty slice (and does not poison the cache with the failure, so
-// the next call retries). cacheKey should be providerID+baseURL so distinct
-// providers/endpoints never share an entry.
-func cachedFetchProviderModels(cacheKey, baseURL, apiKey string, timeout time.Duration) []string {
+// providerModel holds the minimal fields we need from a 9router model entry.
+// "modalities" is optional - many providers only expose the ID.
+type providerModel struct {
+	ID         string   `json:"id"`
+	Modalities []string `json:"modalities,omitempty"`
+}
+
+// cachedFetchProviderModels returns ID + optional modalities from /v1/models.
+// It is additive/fail-open for config loading: fetch failures return nil and
+// are not cached so a later request can retry.
+func cachedFetchProviderModels(cacheKey, baseURL, apiKey string, timeout time.Duration) []providerModel {
 	modelsCacheMu.Lock()
 	if c, ok := modelsCache[cacheKey]; ok && time.Since(c.fetchedAt) < modelsFetchTTL {
-		ids := c.ids
+		cached := c.models
 		modelsCacheMu.Unlock()
-		return ids
+		return cached
 	}
 	modelsCacheMu.Unlock()
 
-	ids, err := fetchProviderModels(baseURL, apiKey, timeout)
+	modelsList, err := fetchProviderModels(baseURL, apiKey, timeout)
 	if err != nil {
-		// Fail open: leave models untouched and allow a retry next time.
 		return nil
 	}
 
 	modelsCacheMu.Lock()
-	modelsCache[cacheKey] = cachedModels{ids: ids, fetchedAt: time.Now()}
+	modelsCache[cacheKey] = cachedModels{models: modelsList, fetchedAt: time.Now()}
 	modelsCacheMu.Unlock()
-	return ids
+	return modelsList
 }
 
-// fetchProviderModels GETs {normalizedBaseURL}/models and returns the listed
-// model ids. baseURL is normalized to end in "/vN" ("/v1" appended when absent).
-// A bearer token is sent only when apiKey != "". Any error (unreachable,
-// timeout, non-2xx, bad JSON) is returned so callers can fail open.
-func fetchProviderModels(baseURL, apiKey string, timeout time.Duration) ([]string, error) {
+// fetchProviderModels GETs {normalizedBaseURL}/models and returns model IDs plus
+// modalities when the list response includes them. No per-model fanout.
+func fetchProviderModels(baseURL, apiKey string, timeout time.Duration) ([]providerModel, error) {
 	endpoint := normalizeBaseURL(baseURL) + "/models"
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
@@ -110,21 +117,19 @@ func fetchProviderModels(baseURL, apiKey string, timeout time.Duration) ([]strin
 	}
 
 	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []providerModel `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
 
-	ids := make([]string, 0, len(body.Data))
+	models := make([]providerModel, 0, len(body.Data))
 	for _, m := range body.Data {
 		if m.ID != "" {
-			ids = append(ids, m.ID)
+			models = append(models, m)
 		}
 	}
-	return ids, nil
+	return models, nil
 }
 
 // normalizeBaseURL trims trailing slashes and ensures a "/vN" suffix, appending
@@ -170,10 +175,14 @@ func humanizeModelID(id string) string {
 	parts := strings.Split(leaf, "-")
 
 	// Trailing word modifiers, prepended in original order.
-	for len(parts) > 1 && modelModifiers[parts[len(parts)-1]] {
+	for len(parts) > 1 {
 		last := parts[len(parts)-1]
+		label, ok := modelModifiers[last]
+		if !ok {
+			break
+		}
 		parts = parts[:len(parts)-1]
-		mods = append([]string{titleToken(last)}, mods...)
+		mods = append([]string{label}, mods...)
 	}
 
 	titled := make([]string, len(parts))

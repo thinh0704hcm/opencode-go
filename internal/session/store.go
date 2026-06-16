@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -125,12 +126,27 @@ func (s *Store) CreateSessionWithID(id, parentID, title, directory string) Sessi
 	if id == "" {
 		id = NewID("ses")
 	}
+	slug := id
+	if strings.HasPrefix(slug, "ses_") {
+		slug = slug[4:]
+	}
+	if len(slug) > 8 {
+		slug = slug[:8]
+	}
 	sess := &Session{
 		ID:        id,
+		Slug:      slug,
 		ParentID:  parentID,
 		Title:     title,
 		Directory: directory,
 		Time:      SessionTime{Created: now, Updated: now},
+		Version:   "1.17.4",
+		ProjectID: func() string {
+			if directory == "" {
+				return "default"
+			}
+			return filepath.Base(directory)
+		}(),
 	}
 	s.mu.Lock()
 	s.sessions[sess.ID] = sess
@@ -187,6 +203,22 @@ func (s *Store) List() []Session {
 	return out
 }
 
+// Children returns all sessions whose ParentID equals parentID, sorted by creation time.
+func (s *Store) Children(parentID string) []Session {
+	s.mu.RLock()
+	out := make([]Session, 0)
+	for _, sess := range s.sessions {
+		if sess.ParentID == parentID {
+			out = append(out, *sess)
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Time.Created < out[j].Time.Created
+	})
+	return out
+}
+
 // GetSession returns a copy of the session and whether it exists.
 func (s *Store) GetSession(id string) (Session, bool) {
 	s.mu.RLock()
@@ -196,6 +228,27 @@ func (s *Store) GetSession(id string) (Session, bool) {
 		return Session{}, false
 	}
 	return *sess, true
+}
+
+// GetSessionChildren returns all child sessions of a parent.
+func (s *Store) GetSessionChildren(parentID string) []Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var children []Session
+	for _, ses := range s.sessions {
+		if ses.ParentID == parentID {
+			children = append(children, *ses)
+		}
+	}
+	// Bubble sort for simplicity since list is usually small
+	for i := 0; i < len(children)-1; i++ {
+		for j := i + 1; j < len(children); j++ {
+			if children[i].Time.Created > children[j].Time.Created {
+				children[i], children[j] = children[j], children[i]
+			}
+		}
+	}
+	return children
 }
 
 // UpdateTitle updates the session and bumps Time.Updated, returning a copy of
@@ -318,7 +371,8 @@ func (s *Store) RemoveMessage(sessionID, messageID string) bool {
 
 // NewAssistantMessage creates an assistant message (time.completed=null) and
 // appends it. Returns a copy.
-func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, agentName, mode string) (MessageWithParts, bool) {
+func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, agentName, mode string, hidden ...bool) (MessageWithParts, bool) {
+	isHidden := len(hidden) > 0 && hidden[0]
 	now := nextMS()
 	if agentName == "" {
 		agentName = "build"
@@ -326,6 +380,7 @@ func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, ag
 	if mode == "" {
 		mode = "build"
 	}
+	zeroCost := 0.0
 	mwp := &MessageWithParts{
 		Info: Message{
 			ID:         NewID("msg"),
@@ -338,6 +393,8 @@ func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, ag
 			ModelID:    modelID,
 			Mode:       mode,
 			Finish:     "stop",
+			Cost:       &zeroCost,
+			Hidden:     isHidden,
 			// Non-nil so the TUI can read tokens.output without dereferencing nil.
 			Tokens: &Tokens{Input: 0, Output: 0, Reasoning: 0, Cache: TokenCache{Read: 0, Write: 0}},
 			Path:   &MsgPath{Cwd: ".", Root: "."},
@@ -364,7 +421,7 @@ func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, ag
 func (s *Store) CopyMessage(targetSessionID string, m MessageWithParts) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if _, ok := s.sessions[targetSessionID]; !ok {
 		return
 	}
@@ -439,6 +496,56 @@ func toolDisplay(toolName string, input map[string]any, output string) (string, 
 	return title, map[string]any{"output": output, "description": desc}
 }
 
+// UpdateSubtaskTarget updates the TargetSessionID of a subtask part.
+// Returns a copy of the updated part and whether the message/part was found.
+func (s *Store) UpdateSubtaskTarget(sessionID, messageID, prompt, targetSessionID string) (Part, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return Part{}, false
+	}
+	
+	for i := len(mwp.Parts)-1; i >= 0; i-- {
+		if mwp.Parts[i].Type == "subtask" && mwp.Parts[i].Prompt == prompt {
+			mwp.Parts[i].TargetSessionID = targetSessionID
+			return mwp.Parts[i], true
+		}
+	}
+	return Part{}, false
+}
+
+// AppendSubtaskPart records a subtask delegation part on the assistant message.
+// Returns a copy of the new part and whether the message was found.
+func (s *Store) AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, providerID, modelID, targetSessionID string) (Part, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return Part{}, false
+	}
+
+	part := Part{
+		ID:              NewID("prt"),
+		MessageID:       messageID,
+		SessionID:       sessionID,
+		Type:            "subtask",
+		Prompt:          prompt,
+		Description:     desc,
+		Agent:           agentName,
+		TargetSessionID: targetSessionID,
+	}
+	if providerID != "" || modelID != "" {
+		part.Model = &PartModel{
+			ProviderID: providerID,
+			ModelID:    modelID,
+		}
+	}
+
+	mwp.Parts = append(mwp.Parts, part)
+	return part, true
+}
+
 // AppendToolPart records a tool-activity part on the assistant message so the
 // agent loop can surface tool calls. Returns a copy of the new part and whether
 // the message was found.
@@ -476,9 +583,18 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 			if input != nil {
 				ep.State.Input = input
 			}
-			ep.State.Output = output
+			if status == "error" {
+				ep.State.Error = output
+				ep.State.Output = ""
+			} else {
+				ep.State.Output = output
+				ep.State.Error = ""
+			}
 			ep.State.Title = title
 			ep.State.Metadata = metadata
+			if status == "completed" && ep.State.Metadata == nil {
+				ep.State.Metadata = map[string]any{}
+			}
 			if end != nil {
 				if ep.State.Time != nil && *end <= ep.State.Time.Start {
 					v := ep.State.Time.Start + 1
@@ -489,6 +605,23 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 			return copyPart(*ep), true
 		}
 	}
+
+	state := &PartState{
+		Status:   status,
+		Input:    input,
+		Title:    title,
+		Metadata: metadata,
+		Time:     &PartStateTime{Start: now, End: end},
+	}
+	if status == "error" {
+		state.Error = output
+	} else {
+		state.Output = output
+	}
+	if status == "completed" && state.Metadata == nil {
+		state.Metadata = map[string]any{}
+	}
+
 	mwp.Parts = append(mwp.Parts, Part{
 		ID:        NewID("prt"),
 		MessageID: messageID,
@@ -496,14 +629,7 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 		Type:      "tool",
 		Tool:      toolName,
 		CallID:    callID,
-		State: &PartState{
-			Status:   status,
-			Input:    input,
-			Output:   output,
-			Title:    title,
-			Metadata: metadata,
-			Time:     &PartStateTime{Start: now, End: end},
-		},
+		State:     state,
 	})
 	p := &mwp.Parts[len(mwp.Parts)-1]
 	return copyPart(*p), true
@@ -525,7 +651,7 @@ func (s *Store) AppendStepFinish(sessionID, messageID, reason string, cost float
 		SessionID: sessionID,
 		Type:      "step-finish",
 		Reason:    reason,
-		Cost:      cost,
+		Cost:      &cost,
 		Tokens:    tokens,
 	})
 	p := &mwp.Parts[len(mwp.Parts)-1]
@@ -561,6 +687,10 @@ func (s *Store) CompleteAssistantMessage(sessionID, messageID string) (Message, 
 	}
 	now := nextMS()
 	mwp.Info.Time.Completed = &now
+	// Bump session updated timestamp so sort-by-recent works in the TUI.
+	if sess := s.sessions[sessionID]; sess != nil {
+		sess.Time.Updated = now
+	}
 	return mwp.Info, true
 }
 
@@ -640,6 +770,10 @@ func copyMessage(m *MessageWithParts) MessageWithParts {
 		p := *m.Info.Path
 		out.Info.Path = &p
 	}
+	if m.Info.Cost != nil {
+		c := *m.Info.Cost
+		out.Info.Cost = &c
+	}
 	out.Parts = make([]Part, len(m.Parts))
 	for i := range m.Parts {
 		out.Parts[i] = copyPart(m.Parts[i])
@@ -669,6 +803,10 @@ func copyPart(p Part) Part {
 	if p.Tokens != nil {
 		tk := *p.Tokens
 		p.Tokens = &tk
+	}
+	if p.Cost != nil {
+		c := *p.Cost
+		p.Cost = &c
 	}
 	return p
 }

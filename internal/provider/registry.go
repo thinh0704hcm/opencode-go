@@ -79,6 +79,7 @@ func BuildRegistry(cfg *config.Config) *Registry {
 		if m, ok := obj["models"].(map[string]any); ok {
 			models = m
 		}
+		ensureModelLimits(models)
 
 		// Auto-populate models from the provider's /v1/models endpoint when it
 		// has a resolved baseURL (ports the ninerouter-models opencode plugin
@@ -86,11 +87,34 @@ func BuildRegistry(cfg *config.Config) *Registry {
 		// are preserved and any fetch error leaves models untouched. The fetch
 		// is TTL-cached so per-request BuildRegistry calls stay fast.
 		if baseURL := resolvedBaseURL(obj); baseURL != "" {
-			for _, mid := range cachedFetchProviderModels(id+"|"+baseURL, baseURL, resolvedAPIKey(obj), 3*time.Second) {
-				if _, exists := models[mid]; exists {
+			for _, pm := range cachedFetchProviderModels(id+"|"+baseURL, baseURL, resolvedAPIKey(obj), 3*time.Second) {
+				if _, exists := models[pm.ID]; exists {
+					ensureModelLimits(map[string]any{pm.ID: models[pm.ID]})
 					continue
 				}
-				models[mid] = map[string]any{"id": mid, "name": humanizeModelID(mid)}
+				entry := map[string]any{"id": pm.ID, "name": humanizeModelID(pm.ID), "limit": defaultModelLimit()}
+				if len(pm.Modalities) > 0 {
+					entry["modalities"] = pm.Modalities
+				}
+				models[pm.ID] = entry
+			}
+		}
+
+		// Fallback: when the backend is unreachable and no models were fetched,
+		// inject the configured default model so the TUI can still select it.
+		if len(models) == 0 && reg.Default != "" {
+			for i := 0; i < len(reg.Default); i++ {
+				if reg.Default[i] == '/' {
+					if reg.Default[:i] == id {
+						mid := reg.Default[i+1:]
+						models[mid] = map[string]any{
+							"id":    mid,
+							"name":  humanizeModelID(mid),
+							"limit": defaultModelLimit(),
+						}
+					}
+					break
+				}
 			}
 		}
 
@@ -118,6 +142,31 @@ func BuildRegistry(cfg *config.Config) *Registry {
 	reg.Connected = connected
 
 	return reg
+}
+
+func defaultModelLimit() map[string]any {
+	return map[string]any{"context": float64(1048576), "output": float64(65536)}
+}
+
+func ensureModelLimits(models map[string]any) {
+	for id, raw := range models {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		limit, ok := entry["limit"].(map[string]any)
+		if !ok {
+			entry["limit"] = defaultModelLimit()
+			models[id] = entry
+			continue
+		}
+		if _, ok := limit["context"]; !ok {
+			limit["context"] = float64(1048576)
+		}
+		if _, ok := limit["output"]; !ok {
+			limit["output"] = float64(65536)
+		}
+	}
 }
 
 // DefaultMap returns the default model as a {providerID:modelID} object, or an

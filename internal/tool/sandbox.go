@@ -116,6 +116,34 @@ func (s *Sandbox) Resolve(rel string) (string, error) {
 	return real, nil
 }
 
+// ResolveReadOnly maps a path for non-mutating tools. It preserves normal
+// sandbox confinement, but allows read-only inspection of system logs needed for
+// security-auditor workflows. This is NOT used by mutating tools.
+func (s *Sandbox) ResolveReadOnly(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		clean := filepath.Clean(path)
+		if clean == "/var/log" || strings.HasPrefix(clean, "/var/log"+string(os.PathSeparator)) {
+			real, err := filepath.EvalSymlinks(clean)
+			if err != nil {
+				return "", fmt.Errorf("sandbox: resolve readonly path: %w", err)
+			}
+			if real == "/var/log" || strings.HasPrefix(real, "/var/log"+string(os.PathSeparator)) {
+				return real, nil
+			}
+			return "", fmt.Errorf("sandbox: readonly path escapes /var/log: %q", path)
+		}
+	}
+	return s.Resolve(path)
+}
+
+func (s *Sandbox) OpenReadOnlyNoFollow(path string) (*os.File, error) {
+	abs, err := s.ResolveReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(abs, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+}
+
 // escapesRoot reports whether a cleaned relative path would resolve outside of
 // the root via ".." elements.
 func escapesRoot(rel string) bool {

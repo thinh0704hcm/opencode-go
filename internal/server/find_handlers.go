@@ -157,3 +157,11 @@ func (s *Server) handleFind(w http.ResponseWriter, r *http.Request) {
 	})
 	writeJSON(w, http.StatusOK, matches)
 }
+
+func (s *Server) handleFindSymbol(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
+func (s *Server) handleFileStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
