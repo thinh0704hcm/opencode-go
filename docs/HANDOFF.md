@@ -119,6 +119,14 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 
 **Result:** TUI tests 25/25 ✅, sad paths 48/58 (1MB curl limitation only). All remaining failures are curl limitations, not server bugs.
 
+### Slice 11: VCS/Session/MCP Parity
+
+**Files touched:**
+- `internal/server/vcs_handlers.go` — added `Patch` field to `vcsApplyRequest`, fallback when `Diff` is empty
+- `internal/server/session_handlers.go` — init validates required fields (400 on missing), fork optional strict JSON decode
+
+**Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API: 25/25 TUI ✅, 48/58 sad paths ✅
+
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
 

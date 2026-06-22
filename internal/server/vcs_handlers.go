@@ -55,7 +55,8 @@ type vcsDiffResponse struct {
 
 // vcsApplyRequest is the POST /vcs/apply body.
 type vcsApplyRequest struct {
-	Diff string `json:"diff"`
+	Diff  string `json:"diff"`
+	Patch string `json:"patch"`
 }
 
 // vcsApplyResponse is the POST /vcs/apply body.
@@ -182,12 +183,17 @@ func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if strings.TrimSpace(req.Diff) == "" {
+    // Use Patch if Diff empty
+    diff := strings.TrimSpace(req.Diff)
+    if diff == "" && strings.TrimSpace(req.Patch) != "" {
+        diff = req.Patch
+    }
+    if diff == "" {
         writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
         return
     }
 
-    _, stderr, err := runGit(dir, []byte(req.Diff), "apply")
+    _, stderr, err := runGit(dir, []byte(diff), "apply")
     if err != nil {
         msg := strings.TrimSpace(stderr)
         if msg == "" {

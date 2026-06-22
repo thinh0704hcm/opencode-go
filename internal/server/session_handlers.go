@@ -344,15 +344,18 @@ func (s *Server) handleSessionNoop(w http.ResponseWriter, r *http.Request) {
     if !requireJSON(w, r) {
         return
     }
-    // Decode strict body expecting non-empty messageID
+    // Decode strict body expecting required fields
     var body struct {
-        MessageID string `json:"messageID"`
+        MessageID  string `json:"messageID"`
+        ModelID    string `json:"modelID"`
+        ProviderID string `json:"providerID"`
     }
     if !decodeStrictBody(w, r, &body, false) {
         return
     }
-    if strings.TrimSpace(body.MessageID) == "" {
-        writeError(w, http.StatusBadRequest, "missing messageID")
+    // Validate all non-empty
+    if strings.TrimSpace(body.MessageID) == "" || strings.TrimSpace(body.ModelID) == "" || strings.TrimSpace(body.ProviderID) == "" {
+        writeError(w, http.StatusBadRequest, "missing required fields")
         return
     }
     id := r.PathValue("id")
@@ -366,22 +369,33 @@ func (s *Server) handleSessionNoop(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionFork currently returns a new child session placeholder.
 func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	parent, ok := s.store.GetSession(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
+    id := r.PathValue("id")
+    parent, ok := s.store.GetSession(id)
+    if !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
+    // If body present, decode strict (optional messageID)
+    if r.ContentLength > 0 {
+        var body struct {
+            MessageID string `json:"messageID,omitempty"`
+        }
+        if !decodeStrictBody(w, r, &body, false) {
+            return
+        }
+        // Currently messageID not used; placeholder for future.
+        _ = body.MessageID
+    }
 
-	child := s.store.CreateSession(id, parent.Title+" (fork)", parent.Directory)
-	// Copy messages from parent into child
-	if msgs, ok := s.store.Messages(id); ok {
-		for _, m := range msgs {
-			s.store.CopyMessage(child.ID, m)
-		}
-	}
-	s.store.PersistSession(child.ID)
-	writeJSON(w, http.StatusOK, child)
+    child := s.store.CreateSession(id, parent.Title+" (fork)", parent.Directory)
+    // Copy messages from parent into child
+    if msgs, ok := s.store.Messages(id); ok {
+        for _, m := range msgs {
+            s.store.CopyMessage(child.ID, m)
+        }
+    }
+    s.store.PersistSession(child.ID)
+    writeJSON(w, http.StatusOK, child)
 }
 
 func (s *Server) handleSessionShare(w http.ResponseWriter, r *http.Request) {
