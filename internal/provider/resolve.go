@@ -17,14 +17,14 @@ import (
 // falls back to the providerID's key in ~/.local/share/opencode/auth.json.
 //
 // ok is true only when both baseURL and apiKey resolve to non-empty values.
-func ResolveDefault(cfg *config.Config) (baseURL, apiKey, providerID, modelID string, ok bool) {
+func ResolveDefault(cfg *config.Config) (baseURL, apiKey, providerID, modelID string, headers map[string]string, ok bool) {
 	if cfg == nil {
-		return "", "", "", "", false
+		return "", "", "", "", nil, false
 	}
 
 	model := cfg.Model()
 	if model == "" {
-		return "", "", "", "", false
+		return "", "", "", "", nil, false
 	}
 	// Split on the FIRST slash so model ids containing slashes (e.g.
 	// "cx/gpt-5.5") stay intact in modelID.
@@ -33,18 +33,27 @@ func ResolveDefault(cfg *config.Config) (baseURL, apiKey, providerID, modelID st
 		modelID = model[i+1:]
 	} else {
 		// No providerID prefix; nothing to look up in the provider map.
-		return "", "", "", "", false
+		return "", "", "", "", nil, false
 	}
 
 	providerMap, _ := cfg.Raw["provider"].(map[string]any)
 	obj, _ := providerMap[providerID].(map[string]any)
 
-	if opts, ok := obj["options"].(map[string]any); ok {
+	opts, _ := obj["options"].(map[string]any)
+	if opts != nil {
 		if s, ok := opts["baseURL"].(string); ok {
 			baseURL = s
 		}
 		if s, ok := opts["apiKey"].(string); ok {
 			apiKey = s
+		}
+		if h, ok := opts["headers"].(map[string]any); ok {
+			headers = make(map[string]string)
+			for k, v := range h {
+				if sv, ok2 := v.(string); ok2 {
+					headers[k] = sv
+				}
+			}
 		}
 	}
 
@@ -53,9 +62,9 @@ func ResolveDefault(cfg *config.Config) (baseURL, apiKey, providerID, modelID st
 	}
 
 	if baseURL == "" || apiKey == "" {
-		return "", "", "", "", false
+		return "", "", "", "", nil, false
 	}
-	return baseURL, apiKey, providerID, modelID, true
+	return baseURL, apiKey, providerID, modelID, headers, true
 }
 
 // authProviderKey reads ~/.local/share/opencode/auth.json and returns the key

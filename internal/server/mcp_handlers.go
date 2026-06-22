@@ -54,49 +54,53 @@ func (s *Server) handleMCPDisconnect(w http.ResponseWriter, r *http.Request) {
 
 // handleMCPAdd serves POST /mcp.
 func (s *Server) handleMCPAdd(w http.ResponseWriter, r *http.Request) {
-	if s.mcp == nil {
-		writeError(w, http.StatusServiceUnavailable, "mcp not configured")
-		return
-	}
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	name, _ := body["name"].(string)
-	cfg, _ := body["config"].(map[string]any)
-	if name == "" {
-		for k, v := range body {
-			if k != "name" {
-				name = k
-				if c, ok := v.(map[string]any); ok {
-					cfg = c
-				}
-				break
-			}
-		}
-	}
-	if name == "" || cfg == nil {
-		writeError(w, http.StatusBadRequest, "missing name or config")
-		return
-	}
-	if err := s.mcp.Add(name, cfg); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	status := s.mcp.Status()
-	for _, st := range status {
-		if st.Name == name {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"name":      name,
-				"status":    st.Status,
-				"error":     st.Error,
-				"toolCount": st.ToolCount,
-			})
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "added"})
+    // Require JSON content type
+    if !requireJSON(w, r) {
+        return
+    }
+    if s.mcp == nil {
+        writeError(w, http.StatusServiceUnavailable, "mcp not configured")
+        return
+    }
+    var body map[string]any
+    if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+        writeError(w, http.StatusBadRequest, "invalid JSON")
+        return
+    }
+    name, _ := body["name"].(string)
+    cfg, _ := body["config"].(map[string]any)
+    if name == "" {
+        for k, v := range body {
+            if k != "name" {
+                name = k
+                if c, ok := v.(map[string]any); ok {
+                    cfg = c
+                }
+                break
+            }
+        }
+    }
+    if name == "" || cfg == nil {
+        writeError(w, http.StatusBadRequest, "missing name or config")
+        return
+    }
+    if err := s.mcp.Add(name, cfg); err != nil {
+        writeError(w, http.StatusBadRequest, err.Error())
+        return
+    }
+    status := s.mcp.Status()
+    for _, st := range status {
+        if st.Name == name {
+            writeJSON(w, http.StatusOK, map[string]any{
+                "name":      name,
+                "status":    st.Status,
+                "error":     st.Error,
+                "toolCount": st.ToolCount,
+            })
+            return
+        }
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "added"})
 }
 
 // handleMCPAuthRemove serves DELETE /mcp/{name}/auth.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,16 +42,51 @@ type sessionCreateRequest struct {
 
 // handleSessionCreate serves POST /session, accepting an empty or partial body.
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	var req sessionCreateRequest
-	_ = decodeBody(r, &req) // body {} accepted; ignore decode errors
+    // Read raw request body (limit 1 MiB).
+    r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+    data, err := io.ReadAll(r.Body)
+    if err != nil {
+        writeError(w, http.StatusBadRequest, "failed to read request body")
+        return
+    }
 
-	s.bus.ClearReplay()
+    var req sessionCreateRequest
+    if len(data) == 0 {
+        // empty body accepted
+    } else {
+        if !requireJSON(w, r) {
+            return
+        }
+        var raw map[string]any
+        if err := json.Unmarshal(data, &raw); err != nil {
+            writeError(w, http.StatusBadRequest, "invalid JSON")
+            return
+        }
+        if v, ok := raw["title"]; ok {
+            if s, ok2 := v.(string); !ok2 || strings.TrimSpace(s) == "" {
+                writeError(w, http.StatusBadRequest, "invalid title")
+                return
+            } else {
+                req.Title = s
+            }
+        }
+        if v, ok := raw["parentID"]; ok {
+            if s, ok2 := v.(string); ok2 {
+                req.ParentID = s
+            } else {
+                writeError(w, http.StatusBadRequest, "invalid parentID")
+                return
+            }
+        }
+    }
 
-	dir := directoryParam(r)
-	sess := s.store.CreateSession(req.ParentID, req.Title, dir)
-	s.store.PersistSession(sess.ID)
-	s.bus.Publish(event.NewSessionCreated(sess.ID, sess))
-	writeJSON(w, http.StatusOK, sess)
+    s.bus.ClearReplay()
+
+    dir := directoryParam(r)
+    sess := s.store.CreateSession(req.ParentID, req.Title, dir)
+    s.store.PersistSession(sess.ID)
+    s.bus.Publish(event.NewSessionCreated(sess.ID, sess))
+    writeJSON(w, http.StatusOK, sess)
 }
 
 // promptPart is one part of a prompt body.
@@ -299,6 +335,73 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		msgs = []session.MessageWithParts{}
 	}
 	writeJSON(w, http.StatusOK, msgs)
+}
+
+// decodeBody decodes the JSON request body into v. An empty body is treated as
+// an empty object (no error).
+
+// hasJSONContentType checks if the request has a JSON content type.
+func hasJSONContentType(r *http.Request) bool {
+    ct := r.Header.Get("Content-Type")
+    return strings.HasPrefix(ct, "application/json")
+}
+
+// requireJSON writes a 400 error if the request doesn't have a JSON content type.
+// Returns true if the request is valid (JSON), false if it was rejected.
+func requireJSON(w http.ResponseWriter, r *http.Request) bool {
+    if !hasJSONContentType(r) {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "expected application/json content type"})
+        return false
+    }
+    return true
+}
+
+// decodeStrictBody decodes a JSON request body and rejects trailing data.
+// If allowEmpty is true, an empty body is accepted (no decode attempted).
+// Returns true if decoding succeeded, false if an error was written.
+func decodeStrictBody(w http.ResponseWriter, r *http.Request, v any, allowEmpty bool) bool {
+    // Check for empty body
+    if r.Body == nil {
+        if allowEmpty {
+            return true
+        }
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body is empty"})
+        return false
+    }
+
+    // Peek at first byte to detect empty body
+    buf, err := io.ReadAll(io.LimitReader(r.Body, 1))
+    if err != nil {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read request body"})
+        return false
+    }
+
+    if len(buf) == 0 {
+        if allowEmpty {
+            return true
+        }
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body is empty"})
+        return false
+    }
+
+    // Reconstruct the reader with the peeked byte
+    body := io.MultiReader(bytes.NewReader(buf), r.Body)
+
+    // Decode JSON
+    dec := json.NewDecoder(body)
+    if err := dec.Decode(v); err != nil {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
+        return false
+    }
+
+    // Reject trailing data
+    var trailing json.RawMessage
+    if err := dec.Decode(&trailing); err != io.EOF {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unexpected trailing data in request body"})
+        return false
+    }
+
+    return true
 }
 
 // decodeBody decodes the JSON request body into v. An empty body is treated as

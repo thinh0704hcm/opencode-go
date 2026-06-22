@@ -10,6 +10,23 @@ import (
 	"github.com/opencode-go/opencode-go/internal/session"
 )
 
+// validSessionID checks if a string looks like a valid session ID.
+// Session IDs start with "ses_" followed by alphanumeric characters.
+func validSessionID(id string) bool {
+    if len(id) < 5 { // "ses_" + at least 1 char
+        return false
+    }
+    if !strings.HasPrefix(id, "ses_") {
+        return false
+    }
+    for _, c := range id[4:] {
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            return false
+        }
+    }
+    return true
+}
+
 // handleSessionList serves GET /session, returning a JSON array of all
 // sessions (empty array on a fresh server, never null).
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
@@ -20,6 +37,10 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 // todo list (empty array when no todos exist).
 func (s *Server) handleSessionTodo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !validSessionID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+		return
+	}
 	if _, ok := s.store.GetSession(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -37,6 +58,10 @@ func (s *Server) handleSessionTodoUpdate(w http.ResponseWriter, r *http.Request)
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
 		sessionID = r.PathValue("sessionID")
+	}
+	if !validSessionID(sessionID) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+		return
 	}
 	if _, ok := s.store.GetSession(sessionID); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -75,6 +100,10 @@ func (s *Server) handleSessionDiff(w http.ResponseWriter, r *http.Request) {
 // session.updated.
 func (s *Server) handleSessionSummarize(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !validSessionID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+		return
+	}
 	if _, ok := s.store.GetSession(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -99,6 +128,10 @@ func (s *Server) handleSessionSummarize(w http.ResponseWriter, r *http.Request) 
 // handleSessionGet serves GET /session/{id}, returning the Session object.
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !validSessionID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+		return
+	}
 	sess, ok := s.store.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -115,34 +148,50 @@ type sessionUpdateRequest struct {
 // handleSessionUpdate serves PATCH /session/{id}, updating the title and
 // publishing session.updated{sessionID, info}.
 func (s *Server) handleSessionUpdate(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, ok := s.store.GetSession(id); !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
+    id := r.PathValue("id")
+    if !validSessionID(id) {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+        return
+    }
+    if _, ok := s.store.GetSession(id); !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
 
-	var req sessionUpdateRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
+    if !requireJSON(w, r) {
+        return
+    }
 
-	// req.Title is nil when the field is omitted; UpdateTitle leaves the title
-	// unchanged in that case and only applies a non-nil value.
-	sess, ok := s.store.UpdateTitle(id, req.Title)
-	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	s.store.PersistSession(id)
-	s.bus.Publish(event.NewSessionUpdated(id, sess))
-	writeJSON(w, http.StatusOK, sess)
+    var req sessionUpdateRequest
+    if !decodeStrictBody(w, r, &req, false) {
+        // decodeStrictBody already wrote an error response.
+        return
+    }
+
+    if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
+        writeError(w, http.StatusBadRequest, "invalid title")
+        return
+    }
+
+    // req.Title is nil when omitted; UpdateTitle applies only non-nil.
+    sess, ok := s.store.UpdateTitle(id, req.Title)
+    if !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
+    s.store.PersistSession(id)
+    s.bus.Publish(event.NewSessionUpdated(id, sess))
+    writeJSON(w, http.StatusOK, sess)
 }
 
 // handleSessionDelete serves DELETE /session/{id}, removing the session and its
 // messages and publishing session.deleted{info}. Returns the bool true.
 func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !validSessionID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+		return
+	}
 	sess, ok := s.store.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -166,6 +215,10 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 // sessions created by delegate/task tool calls with this session as parent.
 func (s *Server) handleSessionChildren(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !validSessionID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session ID format"})
+		return
+	}
 	if _, ok := s.store.GetSession(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -229,22 +282,39 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionRevert stashes uncommitted changes for the session's working directory.
 func (s *Server) handleSessionRevert(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sess, ok := s.store.GetSession(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	dir := sess.Directory
-	if dir == "" {
-		dir = s.workdir
-	}
-	out, err := exec.CommandContext(r.Context(), "git", "-C", dir, "stash", "push", "-u", "--message", "opencode-revert-"+id).CombinedOutput()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, strings.TrimSpace(string(out)))
-		return
-	}
-	writeJSON(w, http.StatusOK, true)
+    id := r.PathValue("id")
+    sess, ok := s.store.GetSession(id)
+    if !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
+    // Validate JSON content type and payload.
+    if !requireJSON(w, r) {
+        return
+    }
+    var req struct {
+        MessageID string `json:"messageID"`
+        PartID    string `json:"partID,omitempty"`
+    }
+    if !decodeStrictBody(w, r, &req, false) {
+        return
+    }
+    if strings.TrimSpace(req.MessageID) == "" || !strings.HasPrefix(req.MessageID, "msg") {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "messageID must be a non-empty string starting with 'msg'"})
+        return
+    }
+    dir := sess.Directory
+    if dir == "" {
+        dir = s.workdir
+    }
+    out, err := exec.CommandContext(r.Context(), "git", "-C", dir, "stash", "push", "-u", "--message", "opencode-revert-"+id).CombinedOutput()
+    if err != nil {
+        writeError(w, http.StatusInternalServerError, strings.TrimSpace(string(out)))
+        return
+    }
+    // partID is currently unused; validation only.
+    _ = req.PartID
+    writeJSON(w, http.StatusOK, true)
 }
 
 // handleSessionUnrevert pops the stash created by revert.
@@ -270,12 +340,28 @@ func (s *Server) handleSessionUnrevert(w http.ResponseWriter, r *http.Request) {
 // handleSessionNoop acknowledges SDK/TUI session actions that are not implemented
 // by opencode-go yet but should not break the 1.17.x client boot flow.
 func (s *Server) handleSessionNoop(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, ok := s.store.GetSession(id); !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, true)
+    // Require JSON content type
+    if !requireJSON(w, r) {
+        return
+    }
+    // Decode strict body expecting non-empty messageID
+    var body struct {
+        MessageID string `json:"messageID"`
+    }
+    if !decodeStrictBody(w, r, &body, false) {
+        return
+    }
+    if strings.TrimSpace(body.MessageID) == "" {
+        writeError(w, http.StatusBadRequest, "missing messageID")
+        return
+    }
+    id := r.PathValue("id")
+    if _, ok := s.store.GetSession(id); !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
+    // Not implemented yet
+    writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "not implemented"})
 }
 
 // handleSessionFork currently returns a new child session placeholder.
@@ -317,5 +403,21 @@ func (s *Server) handleSessionUnshare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
-	s.handlePrompt(w, r)
+    // Validate JSON payload and required fields.
+    if !requireJSON(w, r) {
+        return
+    }
+    var cmd struct {
+        Command   string `json:"command"`
+        Arguments string `json:"arguments"`
+    }
+    if !decodeStrictBody(w, r, &cmd, false) {
+        return
+    }
+    if strings.TrimSpace(cmd.Command) == "" || strings.TrimSpace(cmd.Arguments) == "" {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command and arguments must be non-empty"})
+        return
+    }
+    // Existing behavior: forward to prompt handler.
+    s.handlePrompt(w, r)
 }

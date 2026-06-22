@@ -198,7 +198,7 @@ func buildProvider(logger *slog.Logger) (provider.Provider, string, string, erro
 		}
 	}
 	cfg := config.Load(workdir)
-	if cfgBaseURL, cfgAPIKey, providerID, modelID, ok := provider.ResolveDefault(cfg); ok {
+	if cfgBaseURL, cfgAPIKey, providerID, modelID, _, ok := provider.ResolveDefault(cfg); ok {
 		logger.Info("using provider from opencode config", "provider", providerID, "model", modelID)
 		return provider.NewOpenAI("openai", cfgBaseURL, cfgAPIKey, modelID, &http.Client{Timeout: 0}), modelID, providerID, nil
 	}

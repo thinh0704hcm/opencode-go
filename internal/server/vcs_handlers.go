@@ -160,40 +160,44 @@ func (s *Server) handleVCSDiffRaw(w http.ResponseWriter, r *http.Request) {
 // diff to `git apply` on stdin, constrained to cmd.Dir. Failures return
 // {applied:false,error:<stderr>} with HTTP 200.
 func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
-	dir := directoryParam(r)
+    // Require JSON content type
+    if !requireJSON(w, r) {
+        return
+    }
+    dir := directoryParam(r)
 
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, vcsApplyResponse{Applied: false, Error: err.Error()})
-		return
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		writeJSON(w, http.StatusBadRequest, vcsApplyResponse{Applied: false, Error: "empty request body"})
-		return
-	}
+    raw, err := io.ReadAll(r.Body)
+    if err != nil {
+        writeJSON(w, http.StatusInternalServerError, vcsApplyResponse{Applied: false, Error: err.Error()})
+        return
+    }
+    if len(bytes.TrimSpace(raw)) == 0 {
+        writeJSON(w, http.StatusBadRequest, vcsApplyResponse{Applied: false, Error: "empty request body"})
+        return
+    }
 
-	var req vcsApplyRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: "invalid request body"})
-		return
-	}
+    var req vcsApplyRequest
+    if err := json.Unmarshal(raw, &req); err != nil {
+        writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: "invalid request body"})
+        return
+    }
 
-	if strings.TrimSpace(req.Diff) == "" {
-		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
-		return
-	}
+    if strings.TrimSpace(req.Diff) == "" {
+        writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
+        return
+    }
 
-	_, stderr, err := runGit(dir, []byte(req.Diff), "apply")
-	if err != nil {
-		msg := strings.TrimSpace(stderr)
-		if msg == "" {
-			msg = err.Error()
-		}
-		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: msg})
-		return
-	}
+    _, stderr, err := runGit(dir, []byte(req.Diff), "apply")
+    if err != nil {
+        msg := strings.TrimSpace(stderr)
+        if msg == "" {
+            msg = err.Error()
+        }
+        writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: msg})
+        return
+    }
 
-	writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
+    writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
 }
 
 type vcsDiffStatEntry struct {

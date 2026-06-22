@@ -90,6 +90,20 @@
 
 **Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/session/... ./internal/config/... ./internal/mcp/... ./internal/event/...` ✅
 
+### Slice 9: Request Validation Parity
+
+**Files touched:**
+- `internal/server/handlers.go` — shared JSON helpers (hasJSONContentType, requireJSON, decodeStrictBody)
+- `internal/server/session_handlers.go` — title validation, init 501, session ID validation
+- `internal/server/shell_handlers.go` — shell payload validation
+- `internal/server/vcs_handlers.go` — requireJSON for apply
+- `internal/server/config_handlers.go` — switched to shared helpers
+- `internal/server/mcp_handlers.go` — requireJSON for add
+
+**Validation added:** JSON content-type enforcement, strict body decoding (reject trailing data), session title validation (reject non-string/empty), command/shell/revert payload schemas, init stub returns 501, path ID format validation (ses_ prefix).
+
+**Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API scripts: 48/58 + 23/25 ✅
+
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
 
@@ -188,11 +202,15 @@ M internal/server/generation.go      — sesAdmitSeq removed, Store.NextSeq()
 ### Step 2: ✅ Run API Test Scripts Against Live Server — Complete
 ### Step 3: ✅ Slice 6 — Input Validation + metadata.interrupted Parity — Complete
 ### Step 4: ✅ Slice 7 — Doom-Loop Detection + Todo Fix + DCP Triage — Complete
+### Step 5: ✅ Slice 9 — Request Validation Parity — Complete
 
 Remaining work:
 - API script re‑run
 - Doom-loop integration test
-- Remaining TS parity gaps
+- Remaining TS parity gaps:
+  - command/revert full semantics
+  - MCP remote transports
+  - OAuth
 
 ### Step 1: ✅ Reviewer-Deep Audit — Complete (3rd audit passed, no critical/major findings)
 ### Step 2: ✅ Run API Test Scripts Against Live Server — Complete (47/58 sad-path, 23/25 TUI)

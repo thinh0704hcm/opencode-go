@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+	"strings"
 
 	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/provider"
@@ -32,17 +33,25 @@ type shellRequest struct {
 // it identically. Blocks until the command completes, then returns the final
 // assistant {info, parts}. 404 if the session is unknown.
 func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, ok := s.store.GetSession(id); !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
+    id := r.PathValue("id")
+    if _, ok := s.store.GetSession(id); !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
 
-	var req shellRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
+    // Validate JSON content type and required fields.
+    if !requireJSON(w, r) {
+        return
+    }
+    var req shellRequest
+    if !decodeStrictBody(w, r, &req, false) {
+        return
+    }
+    if strings.TrimSpace(req.Command) == "" || strings.TrimSpace(req.Agent) == "" {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command and agent must be non-empty"})
+        return
+    }
+
 
 	var providerID, modelID string
 	if req.Model != nil {
