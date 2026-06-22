@@ -102,6 +102,14 @@
 
 **Validation added:** JSON content-type enforcement, strict body decoding (reject trailing data), session title validation (reject non-string/empty), command/shell/revert payload schemas, init stub returns 501, path ID format validation (ses_ prefix).
 
+**Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅
+
+### Doom-Loop Tests
+
+Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
+- FewerThanThreshold, ThreeIdenticalCompleted, DifferentToolNames, DifferentInputs
+- PendingStatus, RunningStatus, MixedTextAndToolParts, JSONKeyOrdering
+
 **Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API scripts: 48/58 + 23/25 ✅
 
 ### Slice 10: Test Script Fixes (Sad-Path Completeness)
