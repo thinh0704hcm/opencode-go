@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"time"
 	"fmt"
 	"testing"
 
@@ -334,5 +335,173 @@ func TestDetectDoomLoop_JSONKeyOrdering(t *testing.T) {
 
 	if !srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"a":1,"b":2}`)) {
 		t.Fatal("should detect doom loop regardless of JSON key ordering")
+	}
+}
+
+// Doom-loop integration test: verifies the full permission flow end-to-end.
+// Provider returns 3 identical tool calls per turn. After the first turn,
+// the store has 3 identical completed parts. On the second turn, each new
+// tool call triggers doom-loop detection → permission asked → reply.
+
+type doomLoopProvider struct {
+	turns int
+	calls []provider.ToolCall
+}
+
+func (p *doomLoopProvider) ID() string { return "doom-test" }
+
+func (p *doomLoopProvider) StreamChat(ctx context.Context, req provider.ChatRequest) (<-chan provider.ChatChunk, error) {
+	p.turns++
+	turn := p.turns
+	out := make(chan provider.ChatChunk, 4)
+	go func() {
+		defer close(out)
+		if turn <= 2 {
+			for i := range p.calls {
+				c := p.calls[i]
+				// generate unique ID per turn and call index
+				c.ID = fmt.Sprintf("doom_t%d_%d", turn, i)
+				select {
+				case out <- provider.ChatChunk{ToolCall: &c}:
+				case <-ctx.Done():
+					return
+				}
+			}
+			select {
+			case out <- provider.ChatChunk{FinishReason: "tool_calls"}:
+			case <-ctx.Done():
+				return
+			}
+			return
+		}
+		select {
+		case out <- provider.ChatChunk{TextDelta: "done"}:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case out <- provider.ChatChunk{FinishReason: "stop"}:
+		case <-ctx.Done():
+			return
+		}
+	}()
+	return out, nil
+}
+
+func TestDoomLoopIntegration_Reject(t *testing.T) {
+	calls := []provider.ToolCall{{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}}
+
+	p := &doomLoopProvider{calls: calls}
+	r := tool.NewRegistry()
+	r.Register(abortTestTool{name: "bash", out: "ok"})
+	srv := New(Options{Provider: p, Model: "doom-test", Tools: r, Workdir: t.TempDir(), DataDir: t.TempDir()})
+	srv.store = session.NewStore()
+
+	sub, cancelSub := srv.bus.Subscribe()
+	defer cancelSub()
+
+	sessionID, userID, messageID := newAbortLoopMessage(t, srv)
+
+	doneCh := make(chan string, 1)
+	go func() {
+		doneCh <- srv.runAgentLoop(context.Background(), sessionID, messageID, userID, "doom-test/doom-test", []string{"hi"}, nil, "", Agent{Name: "agent"})
+	}()
+
+	// Wait for permission.asked events, reply "reject"
+	deadline := time.After(10 * time.Second)
+	permCount := 0
+	for {
+		select {
+		case ev := <-sub.Events():
+			if ev.Type == "permission.asked" {
+				permCount++
+				if props, ok := ev.Properties.(map[string]any); ok {
+					if id, ok := props["id"].(string); ok {
+						srv.perms.Reply(id, "reject")
+					}
+				}
+			}
+		case <-deadline:
+			goto DONE_REJECT
+		}
+	}
+DONE_REJECT:
+	if permCount == 0 {
+		t.Fatal("expected at least one doom-loop permission.asked event")
+	}
+
+	// Verify error tool parts were created (reject path)
+	parts := srv.store.MessageParts(sessionID, messageID)
+	errorParts := 0
+	for _, p := range parts {
+		if p.Type == "tool" && p.State != nil && p.State.Status == "error" {
+			errorParts++
+		}
+	}
+	if errorParts == 0 {
+		t.Fatal("expected at least one error tool part after doom-loop reject")
+	}
+}
+
+func TestDoomLoopIntegration_Allow(t *testing.T) {
+	calls := []provider.ToolCall{{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}}
+
+	p := &doomLoopProvider{calls: calls}
+	r := tool.NewRegistry()
+	r.Register(abortTestTool{name: "bash", out: "ok"})
+	srv := New(Options{Provider: p, Model: "doom-test", Tools: r, Workdir: t.TempDir(), DataDir: t.TempDir()})
+	srv.store = session.NewStore()
+
+	sub, cancelSub := srv.bus.Subscribe()
+	defer cancelSub()
+
+	sessionID, userID, messageID := newAbortLoopMessage(t, srv)
+
+	doneCh := make(chan string, 1)
+	go func() {
+		doneCh <- srv.runAgentLoop(context.Background(), sessionID, messageID, userID, "doom-test/doom-test", []string{"hi"}, nil, "", Agent{Name: "agent"})
+	}()
+
+	// Wait for permission.asked, reply "allow" to continue
+	deadline := time.After(10 * time.Second)
+	allowed := false
+	for {
+		select {
+		case ev := <-sub.Events():
+			if ev.Type == "permission.asked" {
+				if props, ok := ev.Properties.(map[string]any); ok {
+					if id, ok := props["id"].(string); ok {
+						srv.perms.Reply(id, "allow")
+						allowed = true
+					}
+				}
+			}
+		case <-deadline:
+			goto DONE_ALLOW
+		}
+	}
+DONE_ALLOW:
+	if !allowed {
+		t.Fatal("expected at least one doom-loop permission.asked event")
+	}
+
+	// Wait for agent loop to finish
+	select {
+	case result := <-doneCh:
+		_ = result // "completed" or similar
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent loop did not finish")
+	}
+
+	// Verify text part was created
+	parts := srv.store.MessageParts(sessionID, messageID)
+	found := false
+	for _, p := range parts {
+		if p.Type == "text" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected text part after doom-loop allow → continued execution")
 	}
 }

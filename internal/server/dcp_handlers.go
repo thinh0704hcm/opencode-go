@@ -19,6 +19,8 @@ type compactRequest struct {
 }
 
 func (s *Server) compactSession(sessionID string, body compactRequest) (session.CompressionBlock, map[string]any, error) {
+	// Emit compaction start event
+	s.bus.Publish(event.NewCompactionStarted(sessionID))
 	if body.KeepRecent <= 0 {
 		body.KeepRecent = 8
 	}
@@ -68,6 +70,8 @@ func (s *Server) compactSession(sessionID string, body compactRequest) (session.
 	// Emit compact & compacted events
 	s.bus.Publish(event.NewSessionCompact(sessionID, block, s.store.DCPStats(sessionID)))
 	s.bus.Publish(event.NewSessionCompacted(sessionID))
+	// Emit compaction end event
+	s.bus.Publish(event.NewCompactionEnded(sessionID))
 	return block, s.store.DCPStats(sessionID), nil
 }
 

@@ -158,7 +158,22 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 - **Global Config Update** (`internal/server/boot_handlers.go`): `handleGlobalConfigUpdate` now validates JSON content type and strict body decoding, returns masked config (was TUIOK stub).
 - **MCP Auth Stubs** (`internal/server/mcp_handlers.go`): 3 auth handlers now return 501 Not Implemented instead of 200 with error JSON.
 - **Event Enrichment** (`internal/event/event.go`): `SessionCompactPayload` extended with `Block` and `Stats` fields. `NewSessionCompact` now accepts block + stats params. All callers updated.
-- **Test Script Fixes** (`scripts/api_sad_paths.sh`): Replaced `nonexistent-uuid-000` with `ses_nonexistent000000000` for valid-format 404 tests. Fixed command test payload (added `arguments`), fixed init test payload (added required fields).
+- **Test Script Fixes** (`scripts/api_sad_paths.sh`): Replaced `nonexistent-uuid-000` with `ses_nonexistent000000000` for valid-format 404 tests. Fixed command test payload (added `arguments`), fixed init test payload
+
+### Slice 15: Doom-Loop Integration Test
+
+- **`detectDoomLoop` fix** (`internal/server/agent_loop.go`): Fixed filtering — now selects only `type=="tool"` parts before applying threshold, instead of taking last N of all parts (which included step-start/text).
+- **`doomLoopProvider` fix** (`internal/server/agent_loop_abort_test.go`): Provider now generates unique call IDs per turn via `fmt.Sprintf("doom_t%d_%d", turn, i)` to prevent UPSERT collisions across turns.
+- **Integration tests** (`internal/server/agent_loop_abort_test.go`): Added `TestDoomLoopIntegration_Reject` and `TestDoomLoopIntegration_Allow` — full agent-loop runs verifying doom-loop permission flow (event-driven reply via permission store).
+
+**Build/test:** `go build ./...` ✅, `go test ./internal/server/... -run TestDetectDoomLoop` 8/8 ✅, `go test ./internal/server/... -run TestDoomLoopIntegration` 2/2 ✅, full suite ✅
+
+### Slice 16: DCP Compression Notification Events
+
+- **Event types** (`internal/event/event.go`): Added `compaction.started` and `compaction.ended` event types + `NewCompactionStarted`/`NewCompactionEnded` constructors.
+- **Event emission** (`internal/server/dcp_handlers.go`): `compactSession()` now emits `compaction.started` at entry and `compaction.ended` after compression, wrapping the existing `session.compact`/`session.compacted` events. Matches TS `compaction.ts:538-585` flow.
+
+**Build/test:** `go build ./...` ✅, `go test ./internal/event/...` ✅, `go test ./internal/server/... -run DCP` ✅ (added required fields).
 
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
@@ -216,7 +231,8 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 | 4 | MCP hoax | N/A | internal/server/*.go | Deferred | ✅ RESOLVED (stdio lifecycle + HTTP handlers) |
 | 5 | DCP/stats | N/A | todo.go | Medium | ✅ RESOLVED (build tags removed, hooks wired) |
 | 6 | Todo | Various | handlers.go, vcs, config | Medium | ✅ RESOLVED (tools registered, HTTP endpoint) |
-| 7 | Doom-loop detection | processor.ts:35 | agent_loop.go:detectDoomLoop | High | ✅ IMPLEMENTED (tests pending) |
+| 7 | Doom-loop detection | processor.ts:35 | agent_loop.go:detectDoomLoop | High | ✅ RESOLVED (Slices 7+15) |
+| 8 | DCP compaction.started/ended events | compaction.ts:538-585 | dcp_handlers.go:compactSession | Medium | ✅ RESOLVED (Slice 16) |
 
 ---
 
@@ -260,13 +276,10 @@ M internal/server/generation.go      — sesAdmitSeq removed, Store.NextSeq()
 ### Step 4: ✅ Slice 7 — Doom-Loop Detection + Todo Fix + DCP Triage — Complete
 ### Step 5: ✅ Slice 9 — Request Validation Parity — Complete
 
-Remaining work:
-- API script re‑run (now 48/58 passed, 1 curl limitation)
-- Doom-loop integration test
-- Remaining TS parity gaps:
-  - command/revert full semantics
-  - MCP remote transports
-  - OAuth
+Remaining work (lower priority):
+- MCP remote transports + OAuth
+- Full snapshot/revert metadata for revert/unrevert
+- Append-only event log with SQL cursors (architectural — deferred)
 
 Remaining items from `user_intentions_and_findings.md`:
 - Finding #3: Subagents infinite loop → needs loop detection (NOT maxTurn=50, which contradicts user directives)

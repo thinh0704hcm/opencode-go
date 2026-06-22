@@ -153,12 +153,18 @@ func joinTexts(texts []string) string {
 // model is stuck in a repeat loop. Returns true if doom loop is detected.
 func (s *Server) detectDoomLoop(sessionID, messageID, toolName string, input []byte) bool {
 	parts := s.store.MessageParts(sessionID, messageID)
-	if len(parts) < doomLoopThreshold {
+	// Filter to only tool parts, ignore text/step-start etc.
+	var toolParts []session.Part
+	for _, p := range parts {
+		if p.Type == "tool" {
+			toolParts = append(toolParts, p)
+		}
+	}
+	if len(toolParts) < doomLoopThreshold {
 		return false
 	}
-	recent := parts[len(parts)-doomLoopThreshold:]
-	// Normalize the incoming input the same way we normalize stored input,
-	// so JSON key ordering differences don't cause false negatives.
+	recent := toolParts[len(toolParts)-doomLoopThreshold:]
+	// Normalize input JSON for comparison.
 	var normalizedInput map[string]any
 	if json.Unmarshal(input, &normalizedInput) != nil {
 		return false

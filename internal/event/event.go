@@ -58,6 +58,10 @@ const (
 	TypeSessionNextReasoningStarted = "session.next.reasoning.started"
 	TypeSessionNextReasoningDelta   = "session.next.reasoning.delta"
 	TypeSessionNextReasoningEnded   = "session.next.reasoning.ended"
+
+// Compaction event types
+    TypeCompactionStarted = "compaction.started"
+    TypeCompactionEnded   = "compaction.ended"
 )
 
 // Todo event types
@@ -256,6 +260,24 @@ func NewSessionCompact(sessionID string, block any, stats map[string]any) Event 
 // NewSessionCompacted creates a session.compacted event with session ID.
 func NewSessionCompacted(sessionID string) Event {
 	return Event{ID: newID("evt"), Type: TypeSessionCompacted, Properties: SessionCompactedProps{SessionID: sessionID}}
+}
+
+// CompactionStartedProps carries session ID for compaction start.
+type CompactionStartedProps struct {
+    SessionID string `json:"sessionID"`
+}
+
+func NewCompactionStarted(sessionID string) Event {
+    return Event{ID: newID("evt"), Type: TypeCompactionStarted, Properties: CompactionStartedProps{SessionID: sessionID}}
+}
+
+// CompactionEndedProps carries session ID for compaction end.
+type CompactionEndedProps struct {
+    SessionID string `json:"sessionID"`
+}
+
+func NewCompactionEnded(sessionID string) Event {
+    return Event{ID: newID("evt"), Type: TypeCompactionEnded, Properties: CompactionEndedProps{SessionID: sessionID}}
 }
 
 // NewMessagePartDelta creates a message.part.delta event (DROPPABLE).
