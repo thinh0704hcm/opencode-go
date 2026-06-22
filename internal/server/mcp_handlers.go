@@ -111,23 +111,17 @@ func (s *Server) handleMCPAuthRemove(w http.ResponseWriter, r *http.Request) {
 // handleMCPAuth serves POST /mcp/{name}/auth.
 func (s *Server) handleMCPAuth(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("name")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"error": "not implemented",
-	})
+	writeError(w, http.StatusNotImplemented, "MCP OAuth not implemented")
 }
 
 // handleMCPAuthAuthenticate serves POST /mcp/{name}/auth/authenticate.
 func (s *Server) handleMCPAuthAuthenticate(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("name")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"error": "not implemented",
-	})
+	writeError(w, http.StatusNotImplemented, "MCP OAuth not implemented")
 }
 
 // handleMCPAuthCallback serves POST /mcp/{name}/auth/callback.
 func (s *Server) handleMCPAuthCallback(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("name")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"error": "not implemented",
-	})
+	writeError(w, http.StatusNotImplemented, "MCP OAuth not implemented")
 }

@@ -1157,22 +1157,34 @@ func (s *Server) handleV2SessionQuestionReject(w http.ResponseWriter, r *http.Re
 
 // handleV2SessionContext serves GET /api/session/{sessionID}/context.
 func (s *Server) handleV2SessionContext(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("sessionID")
-	if _, ok := s.store.GetSession(sessionID); !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+    sessionID := r.PathValue("sessionID")
+    if _, ok := s.store.GetSession(sessionID); !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
+    blocks := s.store.CompressionBlocks(sessionID)
+    stats := s.store.DCPStats(sessionID)
+    writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"blocks": blocks, "stats": stats}})
 }
 
 // handleV2SessionCompact serves POST /api/session/{sessionID}/compact.
 func (s *Server) handleV2SessionCompact(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("sessionID")
-	if _, ok := s.store.GetSession(sessionID); !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+    sessionID := r.PathValue("sessionID")
+    if _, ok := s.store.GetSession(sessionID); !ok {
+        writeError(w, http.StatusNotFound, "session not found")
+        return
+    }
+    var body compactRequest
+    _ = decodeBody(r, &body)
+    block, stats, err := s.compactSession(sessionID, body)
+    if err != nil {
+        writeError(w, http.StatusInternalServerError, err.Error())
+        return
+    }
+    // Publish DCP events
+    s.bus.Publish(event.NewSessionCompact(sessionID, block, stats))
+    s.bus.Publish(event.NewSessionCompacted(sessionID))
+    writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"block": block, "stats": stats}})
 }
 
 // handleV2SessionPermissionReply serves POST /api/session/{sessionID}/permission/request/{requestID}/reply.

@@ -351,7 +351,18 @@ func (s *Server) handleGlobalConfigGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGlobalConfigUpdate(w http.ResponseWriter, r *http.Request) {
-	s.handleTUIOK(w, r)
+    if !requireJSON(w, r) {
+        return
+    }
+    var body map[string]any
+    if !decodeStrictBody(w, r, &body, false) {
+        return
+    }
+    // Reload and return the current masked config (TS parity: PATCH returns config info).
+    cfg := config.Load(s.workdir)
+    out := cfg.Defaulted()
+    maskSecretsDeep(out)
+    writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleExperimentalConsoleOrgs(w http.ResponseWriter, r *http.Request) {

@@ -142,7 +142,7 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 **Files touched:**
 - `internal/event/event.go` — session.compacted event type + constructor
 - `internal/server/dcp_handlers.go` — emit session.compact + session.compacted events after compression
-- `internal/session/dcp.go` — DCPStats token aggregation (input/output/reasoning/cache)
+- `internal/session/dcp.go` --- DCPStats token aggregation (input/output/reasoning/cache)
 - `internal/config/dcp.go` — added Auto, ContextLimit, OutputLimit fields
 - `internal/config/config.go` — parse new DCP fields
 - `internal/server/dcp_overflow.go` — NEW: isDCPOverflow() helper
@@ -150,6 +150,15 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 - `internal/server/v2_handlers.go` — context endpoint returns blocks/stats
 
 **Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/session/... ./internal/config/... ./internal/event/...` ✅
+
+### Slice 14: V2 Handler Parity + API Test Script Fixes
+
+- **V2 Session Context** (`internal/server/v2_handlers.go`): `handleV2SessionContext` now returns real DCP compression blocks + stats instead of empty array stub.
+- **V2 Session Compact** (`internal/server/v2_handlers.go`): `handleV2SessionCompact` now calls `compactSession()` and publishes `session.compact` + `session.compacted` events, instead of returning static `true`.
+- **Global Config Update** (`internal/server/boot_handlers.go`): `handleGlobalConfigUpdate` now validates JSON content type and strict body decoding, returns masked config (was TUIOK stub).
+- **MCP Auth Stubs** (`internal/server/mcp_handlers.go`): 3 auth handlers now return 501 Not Implemented instead of 200 with error JSON.
+- **Event Enrichment** (`internal/event/event.go`): `SessionCompactPayload` extended with `Block` and `Stats` fields. `NewSessionCompact` now accepts block + stats params. All callers updated.
+- **Test Script Fixes** (`scripts/api_sad_paths.sh`): Replaced `nonexistent-uuid-000` with `ses_nonexistent000000000` for valid-format 404 tests. Fixed command test payload (added `arguments`), fixed init test payload (added required fields).
 
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
@@ -246,22 +255,19 @@ M internal/server/generation.go      — sesAdmitSeq removed, Store.NextSeq()
 ## How to Continue
 
 ### Step 1: ✅ Reviewer-Deep Audit — Complete
-### Step 2: ✅ Run API Test Scripts Against Live Server — Complete
+### Step 2: ✅ Run API Test Scripts Against Live Server — Complete (48/58 sad-path, 25/25 TUI)
 ### Step 3: ✅ Slice 6 — Input Validation + metadata.interrupted Parity — Complete
 ### Step 4: ✅ Slice 7 — Doom-Loop Detection + Todo Fix + DCP Triage — Complete
 ### Step 5: ✅ Slice 9 — Request Validation Parity — Complete
 
 Remaining work:
-- API script re‑run
+- API script re‑run (now 48/58 passed, 1 curl limitation)
 - Doom-loop integration test
 - Remaining TS parity gaps:
   - command/revert full semantics
   - MCP remote transports
   - OAuth
 
-### Step 1: ✅ Reviewer-Deep Audit — Complete (3rd audit passed, no critical/major findings)
-### Step 2: ✅ Run API Test Scripts Against Live Server — Complete (47/58 sad-path, 23/25 TUI)
-### Step 3: Next Plan Slice
 Remaining items from `user_intentions_and_findings.md`:
 - Finding #3: Subagents infinite loop → needs loop detection (NOT maxTurn=50, which contradicts user directives)
 - Finding #4: No real MCP/plugin ports → ✅ RESOLVED (stdio lifecycle + HTTP handlers)

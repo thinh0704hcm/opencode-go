@@ -34,55 +34,55 @@ echo ""
 echo "═══ 1. Session Lifecycle Sad Paths ═══"
 
 echo "1.1 Non-existent session GET"
-req GET "/session/nonexistent-uuid-000" "" 404
+req GET "/session/ses_nonexistent000000000" "" 404
 
 echo "1.2 Non-existent session PATCH"
-req PATCH "/session/nonexistent-uuid-000" '{"title":"x"}' 404
+req PATCH "/session/ses_nonexistent000000000" '{"title":"x"}' 404
 
 echo "1.3 Non-existent session DELETE"
-req DELETE "/session/nonexistent-uuid-000" "" 404
+req DELETE "/session/ses_nonexistent000000000" "" 404
 
 echo "1.4 Non-existent session GET messages"
-req GET "/session/nonexistent-uuid-000/message" "" 404
+req GET "/session/ses_nonexistent000000000/message" "" 404
 
 echo "1.5 Non-existent session POST message"
-req POST "/session/nonexistent-uuid-000/message" '{"content":"hi"}' 404
+req POST "/session/ses_nonexistent000000000/message" '{"content":"hi"}' 404
 
 echo "1.6 Non-existent session abort"
-req POST "/session/nonexistent-uuid-000/abort" "" 404
+req POST "/session/ses_nonexistent000000000/abort" "" 404
 
 echo "1.7 Non-existent session summarize"
-req POST "/session/nonexistent-uuid-000/summarize" "" 404
+req POST "/session/ses_nonexistent000000000/summarize" "" 404
 
 echo "1.8 Non-existent session fork"
-req POST "/session/nonexistent-uuid-000/fork" '{}' 404
+req POST "/session/ses_nonexistent000000000/fork" '{}' 404
 
 echo "1.9 Non-existent session share"
-req POST "/session/nonexistent-uuid-000/share" '{}' 404
+req POST "/session/ses_nonexistent000000000/share" '{}' 404
 
 echo "1.10 Non-existent session shell"
-req POST "/session/nonexistent-uuid-000/shell" '{"command":"echo hi"}' 404
+req POST "/session/ses_nonexistent000000000/shell" '{"command":"echo hi"}' 404
 
 echo "1.11 Non-existent session command"
-req POST "/session/nonexistent-uuid-000/command" '{"command":"help"}' 404
+req POST "/session/ses_nonexistent000000000/command" '{"command":"help","arguments":"test"}' 404
 
 echo "1.12 Non-existent session children"
-req GET "/session/nonexistent-uuid-000/children" "" 404
+req GET "/session/ses_nonexistent000000000/children" "" 404
 
 echo "1.13 Non-existent session todo"
-req GET "/session/nonexistent-uuid-000/todo" "" 404
+req GET "/session/ses_nonexistent000000000/todo" "" 404
 
 echo "1.14 Non-existent session diff"
-req GET "/session/nonexistent-uuid-000/diff" "" 404
+req GET "/session/ses_nonexistent000000000/diff" "" 404
 
 echo "1.15 Non-existent session revert"
-req POST "/session/nonexistent-uuid-000/revert" '{}' 404
+req POST "/session/ses_nonexistent000000000/revert" '{}' 404
 
 echo "1.16 Non-existent session unrevert"
-req POST "/session/nonexistent-uuid-000/unrevert" '{}' 404
+req POST "/session/ses_nonexistent000000000/unrevert" '{}' 404
 
 echo "1.17 Non-existent session init"
-req POST "/session/nonexistent-uuid-000/init" '{}' 404
+req POST "/session/ses_nonexistent000000000/init" '{"messageID":"msg_123","modelID":"test","providerID":"test"}' 404
 
 # ============================================================
 # 2. SESSION CREATE SAD PATHS
@@ -194,16 +194,16 @@ echo ""
 echo "═══ 6. V2 API Sad Paths ═══"
 
 echo "6.1 V2 session context on nonexistent session"
-req GET "/api/session/nonexistent-uuid-000/context" "" 404
+req GET "/api/session/ses_nonexistent000000000/context" "" 404
 
 echo "6.2 V2 session compact on nonexistent session"
-req POST "/api/session/nonexistent-uuid-000/compact" "" 404
+req POST "/api/session/ses_nonexistent000000000/compact" "" 404
 
 echo "6.3 V2 permission reply on nonexistent session"
-req POST "/api/session/nonexistent-uuid-000/permission/request/fake/reply" '{"allow":true}' 404
+req POST "/api/session/ses_nonexistent000000000/permission/request/fake/reply" '{"allow":true}' 404
 
 echo "6.4 V2 session messages on nonexistent session"
-req GET "/api/session/nonexistent-uuid-000/message" "" 404
+req GET "/api/session/ses_nonexistent000000000/message" "" 404
 
 # ============================================================
 # 7. VCS / WORKTREE SAD PATHS
