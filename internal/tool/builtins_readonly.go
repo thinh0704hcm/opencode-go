@@ -200,7 +200,7 @@ func stripHTMLTags(s string) string {
 
 type webFetchTool struct{}
 
-func (webFetchTool) Name() string   { return "WebFetch" }
+func (webFetchTool) Name() string   { return "webfetch" }
 func (webFetchTool) Mutating() bool { return false }
 
 func (webFetchTool) Execute(ctx context.Context, input json.RawMessage, sb *Sandbox) (Result, error) {

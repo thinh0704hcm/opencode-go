@@ -10,7 +10,7 @@ import (
 
 func TestToolAdapter(t *testing.T) {
 	py := skipIfNoPython(t)
-	c, err := NewClient("mock", []string{py, "-c", mockServerScript}, nil)
+	c, err := NewStdioClient("mock", []string{py, "-c", mockServerScript}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

@@ -17,7 +17,14 @@ type Session struct {
 	ParentID  string      `json:"parentID,omitempty"`
 	Title     string      `json:"title"`
 	Directory string      `json:"directory"`
+    Revert *RevertInfo `json:"revert,omitempty"`
 	Time      SessionTime `json:"time"`
+}
+
+// RevertInfo stores metadata about a pending revert stash.
+type RevertInfo struct {
+    MessageID string `json:"messageID"`
+    PartID    string `json:"partID,omitempty"`
 }
 
 // SessionTime holds session created/updated timestamps (ms).

@@ -45,6 +45,14 @@ func (s *Server) handlePermissionRespond(w http.ResponseWriter, r *http.Request)
 // permission.replied event. Both reply endpoints feed this one gate.
 func (s *Server) replyPermission(w http.ResponseWriter, requestID, reply string) {
 	sessionID := s.perms.SessionID(requestID)
+	// validate reply
+	switch reply {
+	case "once", "always", "reject":
+		// ok
+	default:
+		writeError(w, http.StatusBadRequest, "invalid reply")
+		return
+	}
 	if err := s.perms.Reply(requestID, reply); err != nil {
 		if err == permission.ErrUnknown {
 			writeError(w, http.StatusNotFound, "unknown permission request")

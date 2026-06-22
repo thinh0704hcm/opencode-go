@@ -15,7 +15,7 @@ import (
 // (Name) is namespaced "<server>_<tool>" to avoid collisions with builtins and
 // other servers; the bare remote name is kept for the tools/call request.
 type toolAdapter struct {
-	client      *Client
+	client      MCPClient
 	remoteName  string // bare tool name on the MCP server
 	fullName    string // namespaced registry name
 	desc        string
@@ -24,7 +24,7 @@ type toolAdapter struct {
 
 // NewToolAdapters builds a tool.Tool for each tool advertised by client.
 // serverName namespaces the registry names.
-func NewToolAdapters(client *Client, defs []ToolDef) []tool.Tool {
+func NewToolAdapters(client MCPClient, defs []ToolDef) []tool.Tool {
 	out := make([]tool.Tool, 0, len(defs))
 	for _, d := range defs {
 		out = append(out, &toolAdapter{

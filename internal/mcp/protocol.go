@@ -1,7 +1,7 @@
 // Package mcp implements a minimal MCP (Model Context Protocol) client over the
 // stdio transport: newline-delimited JSON-RPC 2.0. It supports the subset
 // opencode-go needs — initialize, tools/list, tools/call — for consuming local
-// MCP servers. Remote/SSE transports and OAuth are intentionally unimplemented.
+// MCP servers.
 package mcp
 
 import (
@@ -10,6 +10,21 @@ import (
 	"fmt"
 	"io"
 )
+
+// MCPClient is the interface for MCP client implementations.
+type MCPClient interface {
+    Initialize() error
+    ListTools() ([]ToolDef, error)
+    CallTool(name string, args json.RawMessage) (string, bool, error)
+    ListPrompts() ([]PromptDef, error)
+    GetPrompt(name string, args map[string]string) (*PromptResult, error)
+    ListResources() ([]ResourceDef, error)
+    ReadResource(uri string) (*ResourceContent, error)
+    Close() error
+    Name() string
+    OnToolsChanged(func())
+    OnClose(func(error))
+}
 
 // jsonRPCVersion is the only version this client speaks.
 const jsonRPCVersion = "2.0"
@@ -25,10 +40,11 @@ type rpcRequest struct {
 	Params  any    `json:"params,omitempty"`
 }
 
-// rpcResponse is a JSON-RPC 2.0 response.
+// rpcResponse is a JSON-RPC 2.0 response or notification.
 type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      *int64          `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
 }
@@ -43,6 +59,17 @@ type rpcError struct {
 func (e *rpcError) Error() string {
 	return fmt.Sprintf("mcp rpc error %d: %s", e.Code, e.Message)
 }
+
+type rpcNotification struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+const (
+	NotificationToolsListChanged = "notifications/tools/list_changed"
+	NotificationLoggingMessage   = "notifications/message"
+)
 
 // --- initialize ---
 
@@ -76,6 +103,43 @@ type ToolDef struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"inputSchema"`
+}
+
+// PromptDef describes a prompt advertised by an MCP server.
+type PromptDef struct {
+    Name        string        `json:"name"`
+    Description string        `json:"description,omitempty"`
+    Arguments   []PromptArg   `json:"arguments,omitempty"`
+}
+
+type PromptArg struct {
+    Name        string `json:"name"`
+    Description string `json:"description,omitempty"`
+    Required    bool   `json:"required,omitempty"`
+}
+
+type PromptResult struct {
+    Description string         `json:"description,omitempty"`
+    Messages    []PromptMessage `json:"messages"`
+}
+
+type PromptMessage struct {
+    Role    string `json:"role"`
+    Content any    `json:"content"`
+}
+
+// ResourceDef describes a resource advertised by an MCP server.
+type ResourceDef struct {
+    URI         string `json:"uri"`
+    Name        string `json:"name"`
+    Description string `json:"description,omitempty"`
+    MimeType    string `json:"mimeType,omitempty"`
+}
+
+type ResourceContent struct {
+    URI      string `json:"uri"`
+    MimeType string `json:"mimeType,omitempty"`
+    Text     string `json:"text,omitempty"`
 }
 
 // toolsListResult is the tools/list response.

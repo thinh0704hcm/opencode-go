@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/opencode-go/opencode-go/internal/tool"
 )
@@ -19,11 +20,12 @@ type ServerStatus struct {
 // Manager owns the lifecycle of all configured MCP client connections and
 // exposes their tools as tool.Tool adapters for the agent registry.
 type Manager struct {
-	mu       sync.Mutex
-	configs  map[string]map[string]any
-	clients  map[string]*Client
-	statuses map[string]ServerStatus
-	adapters map[string][]tool.Tool
+    mu       sync.Mutex
+    configs  map[string]map[string]any
+    clients  map[string]MCPClient
+    statuses map[string]ServerStatus
+    adapters map[string][]tool.Tool
+    onToolsChanged func(server string)
 }
 
 // NewManager parses an opencode "mcp" config section (map of serverName ->
@@ -36,7 +38,7 @@ func NewManager(section map[string]any) *Manager {
     // Initialize maps.
     m := &Manager{
         configs:  make(map[string]map[string]any),
-        clients:  make(map[string]*Client),
+        clients:  make(map[string]MCPClient),
         statuses: make(map[string]ServerStatus),
         adapters: make(map[string][]tool.Tool),
     }
@@ -66,15 +68,65 @@ func NewManager(section map[string]any) *Manager {
     return m
 }
 
+// SetToolsChangedCallback registers a callback for tool list changes.
+func (m *Manager) SetToolsChangedCallback(fn func(server string)) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.onToolsChanged = fn
+}
+
+// AdaptersFor returns a copy of the tool adapters for a specific server.
+func (m *Manager) AdaptersFor(name string) []tool.Tool {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    ads := m.adapters[name]
+    out := make([]tool.Tool, len(ads))
+    copy(out, ads)
+    return out
+}
+
 // connectLocked performs the actual client creation and tool discovery for a given server.
 // It assumes the caller holds the manager lock.
 func (m *Manager) connectLocked(name string) (ServerStatus, []tool.Tool, error) {
     cfg := m.configs[name]
     typ, _ := cfg["type"].(string)
     if typ == "remote" {
-        st := ServerStatus{Name: name, Status: "unsupported", Error: "remote transport not implemented"}
+        url, _ := cfg["url"].(string)
+        if url == "" {
+            st := ServerStatus{Name: name, Status: "error", Error: "missing url for remote server"}
+            m.statuses[name] = st
+            return st, nil, fmt.Errorf("missing url")
+        }
+        headers := map[string]string{}
+        if h, ok := cfg["headers"].(map[string]any); ok {
+            for k, v := range h {
+                if s, ok := v.(string); ok {
+                    headers[k] = s
+                }
+            }
+        }
+        timeout := 30 * time.Second
+        if t, ok := cfg["timeout"].(float64); ok && t > 0 {
+            timeout = time.Duration(t) * time.Second
+        }
+        client := NewHTTPClient(name, url, headers, timeout)
+        if err := client.Initialize(); err != nil {
+            st := ServerStatus{Name: name, Status: "error", Error: err.Error()}
+            m.statuses[name] = st
+            return st, nil, err
+        }
+        defs, err := client.ListTools()
+        if err != nil {
+            _ = client.Close()
+            st := ServerStatus{Name: name, Status: "error", Error: err.Error()}
+            m.statuses[name] = st
+            return st, nil, err
+        }
+        m.clients[name] = client
+        ads := NewToolAdapters(client, defs)
+        st := ServerStatus{Name: name, Status: "connected", ToolCount: len(defs)}
         m.statuses[name] = st
-        return st, nil, fmt.Errorf("remote unsupported")
+        return st, ads, nil
     }
     argv := stringSlice(cfg["command"])
     if len(argv) == 0 {
@@ -83,7 +135,7 @@ func (m *Manager) connectLocked(name string) (ServerStatus, []tool.Tool, error) 
         return st, nil, fmt.Errorf("missing command")
     }
     env := envSlice(cfg["environment"])
-    client, err := NewClient(name, argv, env)
+    client, err := NewStdioClient(name, argv, env)
     if err != nil {
         log.Printf("mcp: connect %q failed: %v", name, err)
         st := ServerStatus{Name: name, Status: "error", Error: err.Error()}
@@ -103,6 +155,9 @@ func (m *Manager) connectLocked(name string) (ServerStatus, []tool.Tool, error) 
     ads := NewToolAdapters(client, defs)
     st := ServerStatus{Name: name, Status: "connected", ToolCount: len(defs)}
     m.statuses[name] = st
+    // Register notification callbacks.
+    client.OnToolsChanged(func() { m.refreshTools(name, client) })
+    client.OnClose(func(err error) { m.markClosed(name, client, err) })
     return st, ads, nil
 }
 
@@ -128,21 +183,30 @@ func (m *Manager) Add(name string, cfg map[string]any) error {
 
 // Connect (re)connects a server by name, returning its status and adapters.
 func (m *Manager) Connect(name string) (ServerStatus, []tool.Tool) {
+    // Acquire lock to fetch config and possibly existing client.
     m.mu.Lock()
-    defer m.mu.Unlock()
-    cfg, ok := m.configs[name]
-    _ = cfg
+	_, ok := m.configs[name]
     if !ok {
         st := ServerStatus{Name: name, Status: "error", Error: "config not found"}
         m.statuses[name] = st
+        m.mu.Unlock()
         return st, nil
     }
-    // Close existing client if any.
-    if c, ok := m.clients[name]; ok {
-        _ = c.Close()
+    var oldClient MCPClient
+    if c, exists := m.clients[name]; exists {
+        oldClient = c
         delete(m.clients, name)
         delete(m.adapters, name)
     }
+    m.mu.Unlock()
+
+    // Close old client outside lock to avoid blocking.
+    if oldClient != nil {
+        _ = oldClient.Close()
+    }
+
+    // Re‑lock for establishing new connection.
+    m.mu.Lock()
     st, ads, err := m.connectLocked(name)
     m.statuses[name] = st
     if err == nil {
@@ -150,6 +214,7 @@ func (m *Manager) Connect(name string) (ServerStatus, []tool.Tool) {
     } else {
         m.adapters[name] = nil
     }
+    m.mu.Unlock()
     return st, ads
 }
 
@@ -212,6 +277,56 @@ func mcpEnabled(cfg map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// refreshTools re-fetches tools from a server after a tools/list_changed notification.
+func (m *Manager) refreshTools(name string, client MCPClient) {
+	m.mu.Lock()
+	if m.clients[name] != client {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	defs, err := client.ListTools()
+	if err != nil {
+		log.Printf("mcp: refresh tools %q failed: %v", name, err)
+		return
+	}
+
+	m.mu.Lock()
+	if m.clients[name] != client {
+		m.mu.Unlock()
+		return
+	}
+	m.adapters[name] = NewToolAdapters(client, defs)
+	m.statuses[name] = ServerStatus{Name: name, Status: "connected", ToolCount: len(defs)}
+	cb := m.onToolsChanged
+	m.mu.Unlock()
+
+	log.Printf("mcp: %q tools refreshed (%d tools)", name, len(defs))
+	if cb != nil {
+		cb(name)
+	}
+}
+
+// markClosed handles a client connection closing unexpectedly.
+func (m *Manager) markClosed(name string, client MCPClient, err error) {
+	m.mu.Lock()
+	if m.clients[name] != client {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.clients, name)
+	delete(m.adapters, name)
+	m.statuses[name] = ServerStatus{Name: name, Status: "failed", Error: "Connection closed"}
+	cb := m.onToolsChanged
+	m.mu.Unlock()
+
+	log.Printf("mcp: %q connection closed: %v", name, err)
+	if cb != nil {
+		cb(name)
+	}
 }
 
 // stringSlice coerces a config value (an []any of strings, or a single string)

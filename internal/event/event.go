@@ -37,6 +37,7 @@ const (
 	TypePermissionAsked    = "permission.asked"
 	TypePermissionUpdated  = "permission.updated"
 	TypePermissionReplied  = "permission.replied"
+	TypeToolsChanged       = "tools.changed"
 
 	TypeSessionNextPrompted         = "session.next.prompted"
 	TypeSessionNextPromptAdmitted   = "session.next.prompt.admitted"
@@ -76,6 +77,14 @@ type TodoUpdatedProps struct {
 
 func NewTodoUpdated(sessionID string, todos any) Event {
 	return Event{ID: newID("evt"), Type: TypeTodoUpdated, Properties: TodoUpdatedProps{SessionID: sessionID, Todos: todos}}
+}
+
+type ToolsChangedProps struct {
+	Server string `json:"server"`
+}
+
+func NewToolsChanged(server string) Event {
+	return Event{ID: newID("evt"), Type: TypeToolsChanged, Properties: ToolsChangedProps{Server: server}}
 }
 
 // PartDeltaProps is the properties shape for message.part.delta.

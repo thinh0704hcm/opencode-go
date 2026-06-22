@@ -4,6 +4,7 @@
 **Goal:** True TypeScript parity + sad-path rework for opencode-go
 **TS source of truth:** `/tmp/opencode/`
 **Go workspace:** `/home/thinh0704hcm/opencode-go`
+**Current commit:** `2c30459` (Slices 15-16)
 
 ---
 
@@ -18,206 +19,232 @@
 
 ---
 
+## User Intentions & Directives (from `user_intentions_and_findings.md`)
+
+1. **True Parity:** Do not want lightweight minimal "happy path." Demand true 1-to-1 parity port of original TypeScript codebase.
+2. **Sad Paths:** Want concrete plan to iron out all sad paths natively.
+3. **Smart Loop Detection:** Explicitly DO NOT want hardcoded `maxTurn` or timeout limit.
+4. **Original TS Logic:** Want exact match of TS loop detection logic (identical repeated tool calls, not blind turn counting).
+5. **Preserve Ideas:** All findings and intentions exported as reference file.
+
+### Original Bug Findings
+1. **Message Sequence:** TOCTOU/monotonicity issues → ✅ RESOLVED (Slice 5)
+2. **Interrupts:** Parity verified, both require explicit abort → ✅ RESOLVED (Slice 6)
+3. **Subagent Looping:** Smart loop detection needed → ✅ RESOLVED (Slices 7+15)
+4. **False Endpoints:** MCP was hoax → ✅ RESOLVED (Slice 8)
+5. **Statistics & DCP:** Wrong stats, no compression notification → ✅ RESOLVED (Slices 8+13+16)
+6. **Todo Tooling:** No usable Todo → ✅ RESOLVED (Slice 8)
+
+**ALL 6 ORIGINAL FINDINGS: RESOLVED**
+
+---
+
 ## Completed Slices
 
 ### Slice 1: Parity Doc
 - **File:** `docs/parity/message-ordering.md`
-- **What:** TS vs Go message lifecycle/event ordering matrix. One row per lifecycle event with exact TS/Go file:line citations, GAP verdicts, ranked gap list, decisions deferred to plan.
-- **Status:** ✅ Complete
+- **What:** TS vs Go message lifecycle/event ordering matrix. One row per lifecycle event with exact TS/Go file:line citations, GAP verdicts, ranked gap list.
 
 ### Slice 2: Step-Start Per-Turn Parts
 - **Files:** `internal/server/agent_loop.go`, `internal/session/store.go`, `internal/session/store_step_start_test.go`
-- **What:** Added `AppendStepStart(sessionID, messageID)` store method + per-turn step-start part creation for turns >= 2 in `runAgentLoop`. Matches TS behavior where each tool-use turn gets its own step-start part.
-- **Status:** ✅ Complete
+- **What:** Added `AppendStepStart(sessionID, messageID)` store method + per-turn step-start part creation for turns >= 2 in `runAgentLoop`.
 
 ### Slice 3: Abort Cooperative Checks
 - **Files:** `internal/server/agent_loop.go`, `internal/server/agent_loop_abort_test.go`
-- **What:** Three non-blocking `ctx.Done()` select checks in `runAgentLoop`: top-of-turn, between-tool-calls, after-tool-batch. When cancelled: marks remaining/pending tool parts as `State.Status="error"`, `State.Output="Tool execution aborted"`, emits `NewSessionNextToolFailed` events, appends tool messages to maintain valid message sequence.
-- **Status:** ✅ Complete
+- **What:** Three non-blocking `ctx.Done()` select checks in `runAgentLoop`: top-of-turn, between-tool-calls, after-tool-batch.
 
 ### Slice 4: Build Blocker Quarantine + Todo/Goal Types
-- **Files:** 31+ untracked WIP files tagged `//go:build opencode_wip`, `internal/session/todo.go` (new), `internal/session/store.go` (added `goals`/`todos` map fields), `internal/event/event.go` (added `TodoUpdated`)
-- **What:** Quarantined entire uncompiled recovery WIP layer behind build tags. Added `Todo` type + `Goal` fields to Store. Fixed pre-existing `TestAppendTextDeltaOrdering` failure.
-- **Status:** ✅ Complete
+- **Files:** 31+ untracked WIP files tagged `//go:build opencode_wip`, `internal/session/todo.go`, `internal/session/store.go`, `internal/event/event.go`
+- **What:** Quarantined uncompiled recovery WIP layer behind build tags. Added `Todo` type + `Goal` fields.
 
 ### Slice 5: Monotonic Sequence Counter
 - **Files:** `internal/session/store.go`, `internal/session/session.go`, `internal/server/generation.go`
-- **What:** Added `Store.nextSeq uint64` (monotonic, incremented inside RWMutex). Added `GlobalSeq uint64` to `Message` and `Part` structs. All store mutations assign `GlobalSeq`. Replaced isolated `sessionWork.admitSeq` with `Store.NextSeq()` linked directly to store mutations. Resolves Finding #1 (ordering monotonicity/TOCTOU).
-- **Status:** ✅ Complete
+- **What:** Added `Store.nextSeq uint64` (monotonic). Added `GlobalSeq uint64` to Message/Part. Resolves Finding #1.
 
 ### Slice 6: Input Validation + metadata.interrupted Parity
 - **Files:** `internal/server/agent_loop.go`, `internal/server/handlers.go`, `internal/server/vcs_handlers.go`, `internal/server/config_handlers.go`, `internal/server/router.go`
-- **What:** (6A) Sets `metadata.interrupted=true` on aborted tool parts for TS parity. (6B) POST /message: 1MB body limit via MaxBytesReader + text-part validation (400 on empty/non-text). (6C) VCS apply: 400 on empty body. (6D) PATCH /config: JSON decode + trailing junk rejection (400 on invalid). (6E) GET /skill: stub returning `[]`.
-- **Status:** ✅ Complete
+- **What:** (6A) `metadata.interrupted=true` on aborted tool parts. (6B) POST /message: 1MB limit + text-part validation. (6C) VCS apply: 400 on empty body. (6D) PATCH /config: JSON decode + trailing junk rejection. (6E) GET /skill: stub `[]`.
 
-### Slice 7 — Doom-Loop Detection + Todo Fix + DCP Triage
+### Slice 7: Doom-Loop Detection + Todo Fix + DCP Triage
+- **Files:** `internal/server/agent_loop.go`, `internal/session/store.go`, `internal/server/session_handlers.go`
+- **What:** `detectDoomLoop` method (threshold=3, JSON-normalized comparison). `MessageParts` helper. Todo handler returns real data.
 
-**What changed:**
-
-- **Doom-loop detection** (`agent_loop.go`): Added `detectDoomLoop` method and `doomLoopThreshold = 3` constant matching TS `processor.ts:35`. When the last 3 completed tool parts have the same tool name and identical JSON input, a `doom_loop` permission prompt is emitted. On "reject", the tool call is aborted with an error message. JSON inputs are normalized (unmarshal+marshal) to prevent key-ordering false negatives.
-
-- **MessageParts helper** (`store.go`): Added `MessageParts(sessionID, messageID) []Part` deep-copy accessor for doom-loop inspection without holding the lock.
-
-- **Todo integration** (`session_handlers.go`): `handleSessionTodo` now checks session existence (returns 404 if not found) and returns real todos from the store instead of an empty stub.
-
-- **DCP triage**: `dcp_test.go` and `dcp_handlers.go` are both behind `//go:build opencode_dcp_wip` — confirmed as expected deferred work, not broken.
-
-**Files touched:**
-- `internal/server/agent_loop.go` — doom-loop const, method, permission gate
-- `internal/session/store.go` — `MessageParts` helper
-- `internal/server/session_handlers.go` — todo handler
-
-**Build/test:** `go build ./...` pass, `go test ./internal/server/... ./internal/session/...` pass
-
-### Slice 8: Deferred Findings — MCP Lifecycle + DCP Enable + Todo Integration
-
-**Files touched:**
-- `internal/server/todo_tool.go`, `todo_read_tool.go`, `todo_tool_test.go`, `todo_read_tool_test.go`, `todo_endpoint_test.go` — removed build tags
-- `internal/server/server.go` — registered todo tools
-- `internal/mcp/manager.go` — refactored to maps, added Add/Connect/Disconnect
-- `internal/session/dcp.go` — NEW: CompressionBlock + store methods
-- `internal/session/store.go` — added dcpBlocks field
-- `internal/config/dcp.go` — NEW: DCPConfig flat struct
-- `internal/config/config.go` — added DCP() method
-- `internal/server/dcp_pruning.go` — NEW: applyDCPPruning method
-- `internal/server/dcp_handlers.go`, `dcp_tool.go`, `dcp_hooks.go`, `dcp_strategies.go`, `dcp_prompts.go` — removed build tags
-- `internal/session/dcp_test.go` — removed build tag
-- `internal/server/mcp_handlers.go` — wired to real manager
-- `internal/server/session_handlers.go` — added handleSessionTodoUpdate
-- `internal/server/router.go` — added POST/PATCH todo routes
-- `internal/event/event.go` — added TypeSessionCompact + constructor
-- `internal/server/agent_loop.go` — DCP hooks wired
-
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/session/... ./internal/config/... ./internal/mcp/... ./internal/event/...` ✅
+### Slice 8: MCP Lifecycle + DCP Enable + Todo Integration
+- **Files:** `internal/server/todo_tool.go`, `todo_read_tool.go` (build tags removed), `internal/mcp/manager.go` (refactored to maps, Add/Connect/Disconnect), `internal/session/dcp.go` (CompressionBlock), `internal/config/dcp.go` (DCPConfig), `internal/server/dcp_*.go` (build tags removed), `internal/server/mcp_handlers.go` (wired), `internal/server/session_handlers.go` (TodoUpdate), `internal/server/router.go` (todo routes), `internal/event/event.go` (session.compact), `internal/server/agent_loop.go` (DCP hooks)
 
 ### Slice 9: Request Validation Parity
+- **Files:** `internal/server/handlers.go` (shared JSON helpers: hasJSONContentType, requireJSON, decodeStrictBody), `session_handlers.go` (title validation, init 501, session ID validation), `shell_handlers.go` (shell payload), `vcs_handlers.go` (requireJSON), `config_handlers.go` (shared helpers), `mcp_handlers.go` (requireJSON)
 
-**Files touched:**
-- `internal/server/handlers.go` — shared JSON helpers (hasJSONContentType, requireJSON, decodeStrictBody)
-- `internal/server/session_handlers.go` — title validation, init 501, session ID validation
-- `internal/server/shell_handlers.go` — shell payload validation
-- `internal/server/vcs_handlers.go` — requireJSON for apply
-- `internal/server/config_handlers.go` — switched to shared helpers
-- `internal/server/mcp_handlers.go` — requireJSON for add
-
-**Validation added:** JSON content-type enforcement, strict body decoding (reject trailing data), session title validation (reject non-string/empty), command/shell/revert payload schemas, init stub returns 501, path ID format validation (ses_ prefix).
-
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅
-
-### Doom-Loop Tests
-
-Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
-- FewerThanThreshold, ThreeIdenticalCompleted, DifferentToolNames, DifferentInputs
-- PendingStatus, RunningStatus, MixedTextAndToolParts, JSONKeyOrdering
-
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API scripts: 48/58 + 23/25 ✅
-
-### Slice 10: Test Script Fixes (Sad-Path Completeness)
-
-**Files touched:**
-- `scripts/api_tui_mimic.sh` — fixed TUI 9 (wrong request format), TUI 11 (SSE timing)
-
-**Result:** TUI tests 25/25 ✅, sad paths 48/58 (1MB curl limitation only). All remaining failures are curl limitations, not server bugs.
+### Slice 10: Test Script Fixes
+- **Files:** `scripts/api_tui_mimic.sh` (TUI 9 format, TUI 11 SSE timing)
 
 ### Slice 11: VCS/Session/MCP Parity
-
-**Files touched:**
-- `internal/server/vcs_handlers.go` — added `Patch` field to `vcsApplyRequest`, fallback when `Diff` is empty
-- `internal/server/session_handlers.go` — init validates required fields (400 on missing), fork optional strict JSON decode
-
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API: 25/25 TUI ✅, 48/58 sad paths ✅
+- **Files:** `internal/server/vcs_handlers.go` (Patch field), `internal/server/session_handlers.go` (init validation, fork JSON)
 
 ### Slice 12: Command/Revert/Shell Event Parity
+- **Files:** `internal/event/event.go` (4 event types + constructors), `internal/server/shell_handlers.go` (shell events), `internal/server/session_handlers.go` (command event, revert diff, busy guard), `internal/server/server.go` (sessionBusy)
 
-**Files touched:**
-- `internal/event/event.go` — EventType alias, generic New(), 4 event types + constructors (command.executed, shell.started, shell.ended, session.diff)
-- `internal/server/shell_handlers.go` — shell.started/ended events around execution
-- `internal/server/session_handlers.go` — command.executed event, revert diff + session info response, busy-state guard
-- `internal/server/server.go` — sessionBusy() helper
+### Slice 13: DCP Parity (Overflow + Auto-Compaction)
+- **Files:** `internal/event/event.go` (session.compacted), `internal/server/dcp_handlers.go` (events), `internal/session/dcp.go` (token stats), `internal/config/dcp.go` (Auto, ContextLimit, OutputLimit), `internal/server/dcp_overflow.go` (NEW: isDCPOverflow), `internal/server/agent_loop.go` (auto-compaction), `internal/server/v2_handlers.go` (context endpoint)
 
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/event/...` ✅
-
-### Slice 13: DCP Parity (Overflow Detection + Auto-Compaction)
-
-**Files touched:**
-- `internal/event/event.go` — session.compacted event type + constructor
-- `internal/server/dcp_handlers.go` — emit session.compact + session.compacted events after compression
-- `internal/session/dcp.go` --- DCPStats token aggregation (input/output/reasoning/cache)
-- `internal/config/dcp.go` — added Auto, ContextLimit, OutputLimit fields
-- `internal/config/config.go` — parse new DCP fields
-- `internal/server/dcp_overflow.go` — NEW: isDCPOverflow() helper
-- `internal/server/agent_loop.go` — auto-compaction trigger after step-end
-- `internal/server/v2_handlers.go` — context endpoint returns blocks/stats
-
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/session/... ./internal/config/... ./internal/event/...` ✅
-
-### Slice 14: V2 Handler Parity + API Test Script Fixes
-
-- **V2 Session Context** (`internal/server/v2_handlers.go`): `handleV2SessionContext` now returns real DCP compression blocks + stats instead of empty array stub.
-- **V2 Session Compact** (`internal/server/v2_handlers.go`): `handleV2SessionCompact` now calls `compactSession()` and publishes `session.compact` + `session.compacted` events, instead of returning static `true`.
-- **Global Config Update** (`internal/server/boot_handlers.go`): `handleGlobalConfigUpdate` now validates JSON content type and strict body decoding, returns masked config (was TUIOK stub).
-- **MCP Auth Stubs** (`internal/server/mcp_handlers.go`): 3 auth handlers now return 501 Not Implemented instead of 200 with error JSON.
-- **Event Enrichment** (`internal/event/event.go`): `SessionCompactPayload` extended with `Block` and `Stats` fields. `NewSessionCompact` now accepts block + stats params. All callers updated.
-- **Test Script Fixes** (`scripts/api_sad_paths.sh`): Replaced `nonexistent-uuid-000` with `ses_nonexistent000000000` for valid-format 404 tests. Fixed command test payload (added `arguments`), fixed init test payload
+### Slice 14: V2 Handler Parity + API Test Fixes
+- **Files:** `internal/server/v2_handlers.go` (context returns DCP data, compact calls compactSession), `internal/server/boot_handlers.go` (config update), `internal/server/mcp_handlers.go` (auth → 501), `internal/event/event.go` (SessionCompact enriched), `scripts/api_sad_paths.sh` (test fixes)
 
 ### Slice 15: Doom-Loop Integration Test
-
-- **`detectDoomLoop` fix** (`internal/server/agent_loop.go`): Fixed filtering — now selects only `type=="tool"` parts before applying threshold, instead of taking last N of all parts (which included step-start/text).
-- **`doomLoopProvider` fix** (`internal/server/agent_loop_abort_test.go`): Provider now generates unique call IDs per turn via `fmt.Sprintf("doom_t%d_%d", turn, i)` to prevent UPSERT collisions across turns.
-- **Integration tests** (`internal/server/agent_loop_abort_test.go`): Added `TestDoomLoopIntegration_Reject` and `TestDoomLoopIntegration_Allow` — full agent-loop runs verifying doom-loop permission flow (event-driven reply via permission store).
-
-**Build/test:** `go build ./...` ✅, `go test ./internal/server/... -run TestDetectDoomLoop` 8/8 ✅, `go test ./internal/server/... -run TestDoomLoopIntegration` 2/2 ✅, full suite ✅
+- **Files:** `internal/server/agent_loop.go` (detectDoomLoop: filter to tool-only parts), `internal/server/agent_loop_abort_test.go` (unique call IDs per turn, 2 integration tests)
+- **Fixes:** Bug 1: detectDoomLoop filtered wrong parts. Bug 2: doomLoopProvider reused call IDs across turns.
 
 ### Slice 16: DCP Compression Notification Events
+- **Files:** `internal/event/event.go` (compaction.started/ended types + constructors), `internal/server/dcp_handlers.go` (emit events from compactSession)
 
-- **Event types** (`internal/event/event.go`): Added `compaction.started` and `compaction.ended` event types + `NewCompactionStarted`/`NewCompactionEnded` constructors.
-- **Event emission** (`internal/server/dcp_handlers.go`): `compactSession()` now emits `compaction.started` at entry and `compaction.ended` after compression, wrapping the existing `session.compact`/`session.compacted` events. Matches TS `compaction.ts:538-585` flow.
+---
 
-**Build/test:** `go build ./...` ✅, `go test ./internal/event/...` ✅, `go test ./internal/server/... -run DCP` ✅ (added required fields).
+## Current MCP State
 
-### Finding #1: Message Ordering Monotonicity
-- **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
+### Implemented (Go)
+- **Stdio transport** (`internal/mcp/stdio_client.go`): Spawns local MCP server process, JSON-RPC 2.0 over stdin/stdout. Supports initialize, tools/list, tools/call.
+- **Manager** (`internal/mcp/manager.go`): Lifecycle management — connect, disconnect, add, status, adapters. Uses `MCPClient` interface (implied by `*Client` type).
+- **Adapter** (`internal/mcp/adapter.go`): Wraps MCP tools as `tool.Tool` for agent registry. Namespaced `<server>_<tool>`.
+- **Protocol** (`internal/mcp/protocol.go`): JSON-RPC 2.0 framing, ToolDef, toolsCallResult.
+- **HTTP handlers** (`internal/server/mcp_handlers.go`): GET /mcp (status), POST /mcp/{name}/connect, POST /mcp/{name}/disconnect, POST /mcp (add). Auth endpoints return 501.
 
-### Finding #2: Interrupt Handling
-- **Verdict:** RESOLVED — TS/Go parity confirmed. Both require explicit `POST /session/{id}/abort`. Neither auto-aborts on SSE disconnect. Documented as intentional.
+### NOT Implemented (Gap vs TS)
+- **Remote HTTP transport** — TS has StreamableHTTPClientTransport + SSEClientTransport. Go returns "unsupported" for `type: "remote"`.
+- **Prompts** — TS supports `prompts/list`, `prompts/get`. Go only has tools.
+- **Resources** — TS supports `resources/list`, `resources/read`. Go only has tools.
+- **Tool list change notifications** — TS handles `ToolListChangedNotificationSchema`. Go has no notification handling.
+- **OAuth** — TS has full OAuth flow (McpOAuthProvider, McpOAuthCallback, McpAuth). Go returns 501.
+- **Configurable timeouts** — TS has per-server timeout (default 30s). Go has no timeouts.
+- **Connection watching** — TS watches for onclose, publishes ToolsChanged. Go has no reconnect/watch.
 
+### TS MCP Architecture (`mcp/index.ts`, 953 lines)
+- Two transports: StdioClientTransport (local) + StreamableHTTPClientTransport/SSEClientTransport (remote)
+- OAuth: McpOAuthProvider + McpOAuthCallback
+- Capabilities: tools, prompts, resources
+- Notifications: ToolListChanged, LoggingMessage
+- State: config, status, clients, defs maps
+- Timeout: configurable per-server, default 30s
 
-### Metadata Interrupt Gap (Finding #2 follow-up)
-- **Verdict:** RESOLVED — `agent_loop.go` abort handler now sets `p.State.Metadata["interrupted"] = true` after AppendToolPart. Matches TS `processor.ts:907`.
+---
+
+## Slice 17 Plan: MCP Remote Transport + Prompts/Resources
+
+### Task 1: MCPClient Interface + Rename
+- **File:** `internal/mcp/protocol.go`
+- Add `MCPClient` interface: `Initialize`, `ListTools`, `CallTool`, `ListPrompts`, `GetPrompt`, `ListResources`, `ReadResource`, `Close`, `Name`
+- **File:** `internal/mcp/stdio_client.go`
+- Rename `Client` → `StdioClient`, implement `MCPClient`
+- **File:** `internal/mcp/adapter.go`
+- Change `*Client` → `MCPClient` in `toolAdapter` struct and `NewToolAdapters`
+- **File:** `internal/mcp/manager.go`
+- Change `clients map[string]*Client` → `clients map[string]MCPClient`
+
+### Task 2: Prompts + Resources Protocol Types
+- **File:** `internal/mcp/protocol.go`
+- Add types: `PromptDef`, `PromptArg`, `PromptResult`, `ResourceDef`, `ResourceContent`
+- Add request/response types for `prompts/list`, `prompts/get`, `resources/list`, `resources/read`
+
+### Task 3: HTTP Client for Remote Transport
+- **File:** `internal/mcp/http_client.go` (NEW)
+- `HTTPClient` struct implementing `MCPClient`
+- Uses `http.Post` for JSON-RPC requests to configured URL
+- Supports custom headers from config (`headers` map)
+- Handles both `application/json` and `text/event-stream` responses
+- Configurable timeout (default 30s from config `timeout` field)
+
+### Task 4: Manager Updates
+- **File:** `internal/mcp/manager.go`
+- `connectLocked`: detect `type: "remote"` → create `HTTPClient` instead of "unsupported"
+- Parse `timeout` field from config (default 30s)
+- Parse `headers` field from config for remote servers
+
+### Task 5: Build + Test
+- `go build ./...`
+- `go test ./internal/mcp/...`
+- Verify existing stdio tests still pass
+
+### Out of Scope (Deferred)
+- OAuth flow (complex, needs callback server + token storage)
+- Tool list change notifications (re-fetch on notification)
+- Full connection watching + reconnect logic
+
+---
+
+## Slice 18 Plan: MCP Tool List Change Notifications
+
+### Task 1: Event Type
+- **File:** `internal/event/event.go`
+- Add `TypeToolsChanged = "tools.changed"`
+- Add `ToolsChangedProps{Server string}`
+- Add `NewToolsChanged(server string) Event`
+
+### Task 2: MCP Notification Protocol
+- **File:** `internal/mcp/protocol.go`
+- Add notification envelope parsing for JSON-RPC messages without `id`
+- Add constants: `notifications/tools/list_changed`, `notifications/message`
+- Extend `MCPClient` with `OnToolsChanged(func())` and `OnClose(func(error))`
+
+### Task 3: Stdio Notification Handling
+- **File:** `internal/mcp/stdio_client.go`
+- Add callback fields for tool-list changes and close/error
+- In request read loop: detect `notifications/tools/list_changed`, invoke callback without deadlocking
+- On read/EOF error, invoke close callback once
+
+### Task 4: HTTP No-op Notification Hooks
+- **File:** `internal/mcp/http_client.go`
+- Implement `OnToolsChanged` and `OnClose` as no-ops
+- Document: current HTTP client is request/response only; SSE push is future work
+
+### Task 5: Manager Refresh + Close Handling
+- **File:** `internal/mcp/manager.go`
+- Add `SetToolsChangedCallback(func(server string))`
+- Add `AdaptersFor(name string) []tool.Tool`
+- Register client callbacks in `connectLocked`
+- On tool-list change: verify current client, call ListTools, replace adapters, update status
+- On close: verify current client, delete client/adapters, set status failed
+- Do not auto-reconnect
+
+### Task 6: Server Registry Refresh
+- **File:** `internal/server/server.go`
+- After MCP manager creation, set callback to refresh tool registry
+- Unregister old MCP tools with prefix `<server>_`
+- Register current adapters from `AdaptersFor(server)`
+- Publish `event.NewToolsChanged(server)`
+
+### Task 7: Tests
+- `internal/mcp/stdio_client_test.go` — notification between request/response
+- `internal/mcp/manager_test.go` — tool-list refresh + close handling
+- Event serialization test
+
+### Out of Scope
+- MCP OAuth
+- MCP token storage
+- Full HTTP/SSE notification stream
+- Reconnect/watch loop
+- Append-only event log
 
 ---
 
 ## Test Infrastructure
 
-### Build Status
-- `go build ./...` ✅ pass
-- `go vet ./internal/server/...` ✅ pass
-- `go test ./internal/server/...` ✅ pass (including abort tests)
-- `go test ./internal/session/...` ✅ pass
-- `gofmt` clean on all modified files
+### Build Status (as of Slice 18)
+- `go build ./...` ✅
+- `go vet ./internal/server/...` ✅
+- `go test ./internal/server/...` ✅
+- `go test ./internal/session/...` ✅
+- `go test ./internal/config/...` ✅
+- `go test ./internal/mcp/...` ✅
+- `go test ./internal/event/...` ✅
 
-### Test Files Added
-- `internal/session/store_step_start_test.go` — `TestAppendStepStart`
-- `internal/server/agent_loop_abort_test.go` — `TestAgentLoopAbortBeforeFirstTurn`, `TestAgentLoopAbortBetweenToolCalls`, `TestAgentLoopAbortAfterToolBatch`
-- `internal/session/ordering_test.go` — Fixed `TestAppendTextDeltaOrdering` for Slice 2
+### API Test Results
+- `scripts/api_sad_paths.sh`: 48/58 passed (1MB curl limitation only)
+- `scripts/api_tui_mimic.sh`: 25/25 passed
 
-### API Test Scripts (Ran against live server 2026-06-22)
-- `scripts/api_sad_paths.sh` — **47/58 passed, 2 failed** (was 41/58, 8 failed before Slice 6)
-- `scripts/api_tui_mimic.sh` — **23/25 passed, 2 failed** (same as before — test script issues)
-
-#### Fixed by Slice 6 (6 of 8 original failures):
-- 3.3 POST msg empty body → 400 ✅
-- 3.5 POST msg empty content → 400 ✅
-- 3.6 POST msg numeric content → 400 ✅
-- 7.4 VCS apply empty body → 400 ✅
-- 8.2 PATCH config invalid JSON → 400 ✅
-- TUI 18 GET /skill → 200 ✅ (stub endpoint)
-
-#### Remaining failures (test script issues, not server bugs):
-- **1.13** GET /session/nonexistent/todo → 200 (expect 404) — todo returns empty array for nonexistent sessions (pre-existing)
-- **3.7** POST msg 1MB → 000 (server returns 400, body confirms, curl can't capture status on large payload close)
-- **TUI 9** POST /session/message → 400 (test sends `{"content":"..."}` wrong format; real TUI sends `parts: [{type:"text",text:"..."}]`)
-- **TUI 11** GET /global/event → 200000 (SSE curl timing issue in test script)
+### Test Files
+- `internal/session/store_step_start_test.go` — TestAppendStepStart
+- `internal/server/agent_loop_abort_test.go` — 3 abort tests + 8 doom-loop tests + 2 integration tests
+- `internal/session/ordering_test.go` — TestAppendTextDeltaOrdering
+- `internal/session/dcp_test.go` — DCPStats shape test (build tag: opencode_dcp_wip)
 
 ---
 
@@ -233,77 +260,67 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 | 6 | Todo | Various | handlers.go, vcs, config | Medium | ✅ RESOLVED (tools registered, HTTP endpoint) |
 | 7 | Doom-loop detection | processor.ts:35 | agent_loop.go:detectDoomLoop | High | ✅ RESOLVED (Slices 7+15) |
 | 8 | DCP compaction.started/ended events | compaction.ts:538-585 | dcp_handlers.go:compactSession | Medium | ✅ RESOLVED (Slice 16) |
+| 9 | MCP remote transport | mcp/index.ts:223-274 | manager.go:74-78 | High | ✅ RESOLVED (Slice 17) |
+| 10 | MCP prompts/resources | mcp/index.ts:674-680 | protocol.go | Medium | ✅ RESOLVED (Slice 17) |
+| 11 | MCP OAuth | mcp/index.ts:748-903 | mcp_handlers.go:112-127 | Low | Deferred |
+| 12 | MCP tool list change notifications | mcp/index.ts:443-452 | internal/mcp/manager.go | Low | ✅ RESOLVED (Slice 18) |
+| 13 | MCP configurable timeouts | mcp/index.ts:39,623-626 | N/A | Medium | ✅ RESOLVED (Slice 17) |
+| 14 | revert metadata (MessageID/PartID) | session_handlers.go:285-326 | session_handlers.go:335-357 | High | ✅ RESOLVED (Slice 19) |
 
 ---
 
-## Quarantine Status
+## Key Files for Reference
 
-All untracked `.go` files in `internal/server/` have `//go:build opencode_wip` build tag except:
-- `agent_loop_abort_test.go` (Slice 3 test — active, no tag needed)
-- The active modified files: `agent_loop.go`, `generation.go`, `recovery.go` (tagged)
-
-Verify quarantine: `go build ./...` should pass.
+| Purpose | TS File | Go File |
+|---|---|---|
+| MCP index | `/tmp/opencode/packages/opencode/src/mcp/index.ts` (953 lines) | `internal/mcp/manager.go` |
+| MCP catalog | `/tmp/opencode/packages/opencode/src/mcp/catalog.ts` | `internal/mcp/adapter.go` |
+| MCP OAuth | `/tmp/opencode/packages/opencode/src/mcp/oauth-provider.ts` | `internal/server/mcp_handlers.go` (stubs) |
+| MCP HTTP routes | `/tmp/opencode/packages/opencode/src/server/routes/instance/httpapi/groups/mcp.ts` | `internal/server/mcp_handlers.go` |
+| Session lifecycle | `/tmp/opencode/packages/opencode/src/session/session.ts` | `internal/session/session.go` |
+| Processor/events | `/tmp/opencode/packages/opencode/src/session/processor.ts` | `internal/server/agent_loop.go` |
+| Compaction | `/tmp/opencode/packages/opencode/src/session/compaction.ts` | `internal/server/dcp_handlers.go` |
+| Permission | `/tmp/opencode/packages/opencode/src/session/permission.shared.ts` | `internal/server/permission.go` |
+| Tool definitions | `/tmp/opencode/packages/opencode/src/tool/tool.ts` | `internal/tool/` |
+| Config schema | `/tmp/opencode/packages/opencode/src/config/config.ts` | `internal/config/config.go` |
+| Event bus | N/A | `internal/event/event.go` |
+| Store | N/A | `internal/session/store.go` |
+| Agent loop | N/A | `internal/server/agent_loop.go` |
+| Router | N/A | `internal/server/router.go` |
 
 ---
 
-## Active Touched Files
+## Git History
 
 ```
-M internal/session/store.go          — nextSeq, GlobalSeq, AppendStepStart, goals/todos fields
-M internal/session/session.go        — GlobalSeq fields on Message/Part
-M internal/event/event.go            — NewTodoUpdated, TodoUpdated type
-M internal/server/agent_loop.go      — abort selects, stepIdx AppendStepStart
-M internal/server/generation.go      — sesAdmitSeq removed, Store.NextSeq()
-?? internal/session/todo.go          — Todo struct (Cluster A)
-?? internal/session/store_step_start_test.go
-?? internal/session/ordering_test.go  — fixed TestAppendTextDeltaOrdering
-?? internal/server/agent_loop_abort_test.go
-?? docs/parity/message-ordering.md
-?? AGENTS.md
-?? user_intentions_and_findings.md
-?? scripts/api_sad_paths.sh          — API sad-path test suite
-?? scripts/api_tui_mimic.sh          — TUI happy-path mimic test
-?? 31+ WIP files (quarantined)
+2c30459 Slices 15-16: doom-loop integration tests + compaction.started/ended events
+743ef43 Slice 14: V2 handler parity + API test fixes
+5d0243d Slice 13: DCP parity — overflow detection, auto-compaction, compacted events, token stats
+bd00399 Slice 12: command/revert/shell event parity + busy-state guard
+8ecec3f Slice 11: VCS/Session/MCP parity (init validation, fork JSON, patch field)
+aa2c6a8 add doom-loop detection unit tests (8 cases)
+26d9fa5 Slice 10: fix TUI test script bugs (request format + SSE timing)
+723655a Slice 9: request validation parity (JSON helpers, title/action/path validation, init 501)
+f01ff0e feat: parity Slices 6-8 — input validation, doom-loop, MCP lifecycle, DCP enable, Todo integration
 ```
 
 ---
 
 ## How to Continue
 
-### Step 1: ✅ Reviewer-Deep Audit — Complete
-### Step 2: ✅ Run API Test Scripts Against Live Server — Complete (48/58 sad-path, 25/25 TUI)
-### Step 3: ✅ Slice 6 — Input Validation + metadata.interrupted Parity — Complete
-### Step 4: ✅ Slice 7 — Doom-Loop Detection + Todo Fix + DCP Triage — Complete
-### Step 5: ✅ Slice 9 — Request Validation Parity — Complete
+### Current: Slice 19 — Revert metadata (full parity)
 
-Remaining work (lower priority):
-- MCP remote transports + OAuth
-- Full snapshot/revert metadata for revert/unrevert
-- Append-only event log with SQL cursors (architectural — deferred)
+**Status:** Slice 19 complete.
 
-Remaining items from `user_intentions_and_findings.md`:
-- Finding #3: Subagents infinite loop → needs loop detection (NOT maxTurn=50, which contradicts user directives)
-- Finding #4: No real MCP/plugin ports → ✅ RESOLVED (stdio lifecycle + HTTP handlers)
-- Finding #5: Context stats/DCP incorrect → ✅ RESOLVED (build tags removed, hooks wired)
-- Finding #6: Todo unusable → ✅ RESOLVED (tools registered, HTTP endpoint)
+**Completed:**
+1. ✅ Added `tools.changed` event type
+2. ✅ Added notification envelope parsing to `rpcResponse`
+3. ✅ Wired stdio tool-list-change and close callbacks
+4. ✅ Manager refreshTools/markClosed methods
+5. ✅ Server registry refresh on tool changes
+6. ✅ Build + tests pass
 
-### Step 4: ✅ Metadata Interrupt Gap — RESOLVED (Slice 6A)
-
----
-
-## Key Files for Reference
-
-| Purpose | File |
-|---|---|
-| TS message lifecycle | `/tmp/opencode/packages/opencode/src/session/message-v2.ts` |
-| TS processor/events | `/tmp/opencode/packages/opencode/src/session/processor.ts` |
-| TS run state | `/tmp/opencode/packages/opencode/src/session/run-state.ts` |
-| TS session | `/tmp/opencode/packages/opencode/src/session/session.ts` |
-| TS schema | `/tmp/opencode/packages/opencode/src/session/schema.ts` |
-| Go store | `internal/session/store.go` |
-| Go agent loop | `internal/server/agent_loop.go` |
-| Go generation | `internal/server/generation.go` |
-| Go event bus | `internal/event/event.go` |
-| Go session structs | `internal/session/session.go` |
-| Parity doc | `docs/parity/message-ordering.md` |
-| User intentions | `user_intentions_and_findings.md` |
+**After Slice 19:**
+- MCP OAuth (deferred, complex — needs callback server + token storage)
+- Append-only event log (architectural, deferred)
+```

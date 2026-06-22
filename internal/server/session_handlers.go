@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/session"
@@ -256,8 +257,6 @@ func (s *Server) handleSessionAbort(w http.ResponseWriter, r *http.Request) {
 		// Already idle — emit idle confirmation so SSE-watching clients unblock.
 		s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
 		s.bus.Publish(event.NewSessionIdle(id))
-s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
-        s.bus.Publish(event.NewSessionIdle(id))
         writeJSON(w, http.StatusOK, true)
 		return
 	}
@@ -318,11 +317,17 @@ func (s *Server) handleSessionRevert(w http.ResponseWriter, r *http.Request) {
         writeError(w, http.StatusInternalServerError, strings.TrimSpace(string(out)))
         return
     }
-    // partID is currently unused; validation only.
-    _ = req.PartID
-s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
-        s.bus.Publish(event.NewSessionIdle(id))
-        writeJSON(w, http.StatusOK, true)
+    // Store revert metadata on session.
+    sess.Revert = &session.RevertInfo{
+        MessageID: req.MessageID,
+        PartID:    req.PartID,
+    }
+    sess.Time.Updated = time.Now().UnixMilli()
+    s.store.UpdateSession(sess)
+
+    s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
+    s.bus.Publish(event.NewSessionIdle(id))
+    writeJSON(w, http.StatusOK, sess)
 }
 
 // handleSessionUnrevert pops the stash created by revert.
@@ -331,6 +336,10 @@ func (s *Server) handleSessionUnrevert(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.store.GetSession(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if s.sessionBusy(id) {
+		writeJSON(w, http.StatusConflict, map[string]any{"_tag":"ConflictError","message":"session is busy","resource":"session"})
 		return
 	}
 	dir := sess.Directory
@@ -342,7 +351,14 @@ func (s *Server) handleSessionUnrevert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, strings.TrimSpace(string(out)))
 		return
 	}
-	writeJSON(w, http.StatusOK, true)
+	// Clear revert metadata.
+	sess.Revert = nil
+	sess.Time.Updated = time.Now().UnixMilli()
+	s.store.UpdateSession(sess)
+
+	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
+	s.bus.Publish(event.NewSessionIdle(id))
+	writeJSON(w, http.StatusOK, sess)
 }
 
 // handleSessionNoop acknowledges SDK/TUI session actions that are not implemented

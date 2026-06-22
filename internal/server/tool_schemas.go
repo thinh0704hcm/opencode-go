@@ -181,8 +181,8 @@ var builtinToolSchemas = map[string]provider.ToolSchema{
 			"required": []string{"pattern"},
 		},
 	},
-	"WebFetch": {
-		Name:        "WebFetch",
+	"webfetch": {
+		Name:        "webfetch",
 		Description: "Fetch the content of a URL and return its text.",
 		Parameters: map[string]any{
 			"type": "object",

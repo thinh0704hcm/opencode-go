@@ -174,7 +174,7 @@ func (s *Server) detectDoomLoop(sessionID, messageID, toolName string, input []b
 		if p.Type != "tool" || p.Tool != toolName {
 			return false
 		}
-		if p.State == nil || p.State.Status == "pending" || p.State.Status == "running" {
+		if p.State == nil || p.State.Status == "pending" {
 			return false
 		}
 		partInput, _ := json.Marshal(p.State.Input)
@@ -295,41 +295,55 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			}
 
 			streamErr = nil
-			for chunk := range stream {
-				if chunk.Err != nil {
-					streamErr = chunk.Err
-					for range stream {
+			// Read stream with cancellation support.
+			for {
+				select {
+				case <-ctx.Done():
+					attemptCancel()
+					return ""
+				case chunk, ok := <-stream:
+					if !ok {
+						// Stream closed normally.
+						goto streamDone
 					}
-					break
-				}
-				if chunk.TextDelta != "" {
-					if textID == "" {
-						textID = event.NewID("txt")
-						s.bus.Publish(event.NewSessionNextTextStarted(sessionID, messageID, textID))
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+						// Drain remaining chunks.
+						for range stream {
+						}
+						goto streamDone
 					}
-					textBuf.WriteString(chunk.TextDelta)
-					s.bus.Publish(event.NewSessionNextTextDelta(sessionID, messageID, textID, chunk.TextDelta))
-					s.emitDelta(sessionID, messageID, "text", chunk.TextDelta)
-				}
-				if chunk.ReasoningDelta != "" {
-					if reasoningID == "" {
-						reasoningID = event.NewID("rsn")
-						s.bus.Publish(event.NewSessionNextReasoningStarted(sessionID, messageID, reasoningID))
+					if chunk.TextDelta != "" {
+						if textID == "" {
+							textID = event.NewID("txt")
+							s.bus.Publish(event.NewSessionNextTextStarted(sessionID, messageID, textID))
+						}
+						textBuf.WriteString(chunk.TextDelta)
+						s.bus.Publish(event.NewSessionNextTextDelta(sessionID, messageID, textID, chunk.TextDelta))
+						s.emitDelta(sessionID, messageID, "text", chunk.TextDelta)
 					}
-					reasoning.WriteString(chunk.ReasoningDelta)
-					s.bus.Publish(event.NewSessionNextReasoningDelta(sessionID, messageID, reasoningID, chunk.ReasoningDelta))
-					s.emitDelta(sessionID, messageID, "reasoning", chunk.ReasoningDelta)
-				}
-				if chunk.ToolCall != nil {
-					calls = append(calls, *chunk.ToolCall)
-				}
-				if chunk.Usage != nil {
-					s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total)
-				}
-				if chunk.FinishReason != "" {
-					finishReason = chunk.FinishReason
+					if chunk.ReasoningDelta != "" {
+						if reasoningID == "" {
+							reasoningID = event.NewID("rsn")
+							s.bus.Publish(event.NewSessionNextReasoningStarted(sessionID, messageID, reasoningID))
+						}
+						reasoning.WriteString(chunk.ReasoningDelta)
+						s.bus.Publish(event.NewSessionNextReasoningDelta(sessionID, messageID, reasoningID, chunk.ReasoningDelta))
+						s.emitDelta(sessionID, messageID, "reasoning", chunk.ReasoningDelta)
+					}
+					if chunk.ToolCall != nil {
+						calls = append(calls, *chunk.ToolCall)
+					}
+					if chunk.Usage != nil {
+						s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total)
+					}
+					if chunk.FinishReason != "" {
+						finishReason = chunk.FinishReason
+					}
 				}
 			}
+	streamDone:
+
 
 			attemptCancel()
 
@@ -453,12 +467,16 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 					}
 				}
 
-				part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, partProviderID, partModelID, "")
-				s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
+part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, partProviderID, partModelID, "")
+				 s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
 
-				// We ALSO create a standard tool part so state machines understand this is a running operation.
+				// Also create a tool part to track lifecycle of the subtask.
+				var subtoolInput map[string]any
+				_ = json.Unmarshal(call.Input, &subtoolInput)
+				pTool, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", subtoolInput, "")
+				s.bus.Publish(event.NewMessagePartUpdated(sessionID, pTool, time.Now().UnixMilli()))
+
 				// By convention, tools that spawn subtasks shouldn't bypass the tool lifecycle entirely.
-				// The prompt says: "In internal/server/agent_loop.go, stop bypassing normal ToolPart lifecycle for delegate/task. Treat them as normal tools for state tracking: running -> completed/error via AppendToolPart, publish existing tool events with SDK-required fields if event structs support it."
 			}
 
 			s.bus.Publish(event.NewSessionNextToolInputStarted(sessionID, messageID, call.ID, call.Name))

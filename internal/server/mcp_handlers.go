@@ -45,7 +45,7 @@ func (s *Server) handleMCPDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.mcp.Disconnect(name)
-	s.tools.Unregister(name + "_") // Unregister all tools with this prefix
+	s.tools.Unregister(name + ":") // Unregister all tools with this prefix
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":   name,
 		"status": status.Status,

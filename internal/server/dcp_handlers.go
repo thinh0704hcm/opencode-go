@@ -65,11 +65,13 @@ func (s *Server) compactSession(sessionID string, body compactRequest) (session.
 		return session.CompressionBlock{}, s.store.DCPStats(sessionID), nil
 	}
 	summary := "DCP compression summary\n" + strings.Join(summaryLines, "\n")
-	block := session.CompressionBlock{ID: session.NewID("dcp"), SessionID: sessionID, Mode: body.Mode, Summary: summary, StartIndex: 0, EndIndex: endIndex, OriginalCount: len(compressMsgs), OriginalChars: origChars, Created: time.Now().UnixMilli(), Focus: body.Focus, Active: true}
+	block := session.CompressionBlock{ID: session.NewID("dcp"), SessionID: sessionID, Mode: body.Mode, Summary: summary, StartIndex: 0, EndIndex: endIndex, OriginalCount: len(compressMsgs), OriginalChars: origChars, MessageID: compressMsgs[len(compressMsgs)-1].Info.ID, Created: time.Now().UnixMilli(), Focus: body.Focus, Active: true}
 	s.store.AddCompressionBlock(sessionID, block)
-	// Emit compact & compacted events
-	s.bus.Publish(event.NewSessionCompact(sessionID, block, s.store.DCPStats(sessionID)))
-	s.bus.Publish(event.NewSessionCompacted(sessionID))
+	if len(compressMsgs) > 0 {
+		// Emit compact & compacted events
+		s.bus.Publish(event.NewSessionCompact(sessionID, block, s.store.DCPStats(sessionID)))
+		s.bus.Publish(event.NewSessionCompacted(sessionID))
+	}
 	// Emit compaction end event
 	s.bus.Publish(event.NewCompactionEnded(sessionID))
 	return block, s.store.DCPStats(sessionID), nil

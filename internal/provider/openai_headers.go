@@ -10,7 +10,6 @@ import (
 type OpenAIWithHeaders struct {
     *OpenAI
     headers map[string]string
-    baseURL string
 }
 
 // NewOpenAIWithHeaders builds an OpenAI provider with optional Helicone headers.
@@ -20,7 +19,7 @@ func NewOpenAIWithHeaders(id, baseURL, apiKey, model string, client *http.Client
     // base provider (ignores headers)
     o := NewOpenAI(id, baseURL, apiKey, model, client)
     // Init wrapper
-    wrapper := &OpenAIWithHeaders{OpenAI: o, headers: map[string]string{}, baseURL: o.baseURL}
+    wrapper := &OpenAIWithHeaders{OpenAI: o, headers: map[string]string{}}
     // Set Helicone auth header if key provided
     if apiKey != "" {
         wrapper.headers["Helicone-Auth"] = "Bearer " + apiKey
@@ -29,7 +28,7 @@ func NewOpenAIWithHeaders(id, baseURL, apiKey, model string, client *http.Client
     wrapper.headers["Helicone-Target-URL"] = o.baseURL
     // Override base URL with env var if valid (starts with https://)
     if env := os.Getenv("HELICONE_BASE_URL"); env != "" && strings.HasPrefix(env, "https://") {
-        wrapper.baseURL = strings.TrimRight(env, "/")
+        wrapper.OpenAI.baseURL = strings.TrimRight(env, "/")
     }
     return wrapper
 }

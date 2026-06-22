@@ -120,7 +120,7 @@ func sessionTitleFromTexts(texts []string) string {
 	joined := strings.TrimSpace(strings.Join(texts, " "))
 	joined = strings.Join(strings.Fields(joined), " ")
 	if joined == "" {
-		return "New session"
+		return "New session - " + time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	r := []rune(joined)
 	if len(r) > 60 {
@@ -186,25 +186,41 @@ func (s *Store) DropTextAndReasoningParts(sessionID, messageID string) {
 			kept = append(kept, p)
 		}
 	}
+	// nil out stripped parts for GC
+	for i := len(kept); i < len(mwp.Parts); i++ {
+		mwp.Parts[i] = Part{}
+	}
 	mwp.Parts = kept
 }
 
-// RemoveMessage removes a message and its parts from a session.
-func (s *Store) RemoveMessage(sessionID, messageID string) bool {
+ // RemoveMessage removes a message and its parts from a session.
+ func (s *Store) RemoveMessage(sessionID, messageID string) bool {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 	msgs, ok := s.messages[sessionID]
+ 	if !ok {
+ 		return false
+ 	}
+ 	for i, m := range msgs {
+ 		if m.Info.ID == messageID {
+ 			s.messages[sessionID] = append(msgs[:i], msgs[i+1:]...)
+ 			return true
+ 		}
+ 	}
+ 	return false
+ }
+// UpdateSession updates a session in the store.
+func (s *Store) UpdateSession(sess Session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	msgs, ok := s.messages[sessionID]
-	if !ok {
-		return false
-	}
-	for i, m := range msgs {
-		if m.Info.ID == messageID {
-			s.messages[sessionID] = append(msgs[:i], msgs[i+1:]...)
-			return true
-		}
-	}
-	return false
+	cp := sess
+	s.sessions[cp.ID] = &cp
 }
+
+
+
+
+
 
 // NewAssistantMessage creates an assistant message (time.completed=null) and
 // appends it. Returns a copy.

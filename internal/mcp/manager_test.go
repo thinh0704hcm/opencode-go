@@ -38,7 +38,7 @@ func TestManagerHandlesBadAndDisabled(t *testing.T) {
 	if byName["disabled"].Status != "disconnected" {
 		t.Fatalf("disabled = %+v", byName["disabled"])
 	}
-	if byName["remote"].Status != "unsupported" {
+	if byName["remote"].Status != "error" {
 		t.Fatalf("remote = %+v", byName["remote"])
 	}
 	if byName["nocmd"].Status != "error" {

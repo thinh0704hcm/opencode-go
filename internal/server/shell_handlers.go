@@ -51,9 +51,12 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
     if !decodeStrictBody(w, r, &req, false) {
         return
     }
-    if strings.TrimSpace(req.Command) == "" || strings.TrimSpace(req.Agent) == "" {
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command and agent must be non-empty"})
+    if strings.TrimSpace(req.Command) == "" {
+        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command must be non-empty"})
         return
+    }
+    if strings.TrimSpace(req.Agent) == "" {
+        req.Agent = "build"
     }
 
 

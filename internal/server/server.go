@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +114,20 @@ func New(opts Options) *Server {
 	logger.Debug("tool registered", "name", "task")
 	srv.tools.Register(todoWriteTool{srv: srv})
 	srv.tools.Register(todoReadTool{srv: srv})
+	// Wire MCP tool-list change notifications.
+	mcpMgr.SetToolsChangedCallback(func(server string) {
+		// Unregister old MCP tools for this server, then register current adapters.
+		prefix := server + "_"
+		for _, t := range srv.tools.List() {
+			if strings.HasPrefix(t.Name(), prefix) {
+				srv.tools.Unregister(t.Name())
+			}
+		}
+		for _, adapter := range mcpMgr.AdaptersFor(server) {
+			srv.tools.Register(adapter)
+		}
+		srv.bus.Publish(event.NewToolsChanged(server))
+	})
 	return srv
 }
 

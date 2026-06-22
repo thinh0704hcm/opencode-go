@@ -189,7 +189,7 @@ func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
         diff = req.Patch
     }
     if diff == "" {
-        writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
+writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false})
         return
     }
 
