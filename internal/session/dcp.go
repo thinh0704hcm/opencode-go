@@ -52,16 +52,42 @@ func (s *Store) DCPStats(sessionID string) map[string]any {
     totalOriginalCount := 0
     totalOriginalChars := 0
     totalSummaryChars := 0
+    // token aggregates
+    inputTokens := 0
+    outputTokens := 0
+    reasoningTokens := 0
+    cacheReadTokens := 0
+    cacheWriteTokens := 0
+
     for _, b := range blocks {
         totalOriginalCount += b.OriginalCount
         totalOriginalChars += b.OriginalChars
         totalSummaryChars += len(b.Summary)
     }
+    // aggregate token counts from messages
+    for _, m := range s.messages[sessionID] {
+        if m.Info.Tokens != nil {
+            t := m.Info.Tokens
+            inputTokens += int(t.Input)
+            outputTokens += int(t.Output)
+            reasoningTokens += int(t.Reasoning)
+            cacheReadTokens += int(t.Cache.Read)
+            cacheWriteTokens += int(t.Cache.Write)
+        }
+    }
+    totalTokens := inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens
+
     return map[string]any{
         "blocks":         len(blocks),
         "originalCount":  totalOriginalCount,
         "originalChars":  totalOriginalChars,
         "summaryChars":   totalSummaryChars,
         "savedChars":     totalOriginalChars - totalSummaryChars,
+        "inputTokens":    inputTokens,
+        "outputTokens":   outputTokens,
+        "reasoningTokens": reasoningTokens,
+        "cacheReadTokens": cacheReadTokens,
+        "cacheWriteTokens": cacheWriteTokens,
+        "totalTokens":    totalTokens,
     }
 }

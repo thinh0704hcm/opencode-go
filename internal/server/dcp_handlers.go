@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/opencode-go/opencode-go/internal/config"
+	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/session"
 	"net/http"
 	"strings"
@@ -64,6 +65,9 @@ func (s *Server) compactSession(sessionID string, body compactRequest) (session.
 	summary := "DCP compression summary\n" + strings.Join(summaryLines, "\n")
 	block := session.CompressionBlock{ID: session.NewID("dcp"), SessionID: sessionID, Mode: body.Mode, Summary: summary, StartIndex: 0, EndIndex: endIndex, OriginalCount: len(compressMsgs), OriginalChars: origChars, Created: time.Now().UnixMilli(), Focus: body.Focus, Active: true}
 	s.store.AddCompressionBlock(sessionID, block)
+	// Emit compact & compacted events
+	s.bus.Publish(event.NewSessionCompact(sessionID, block, s.store.DCPStats(sessionID)))
+	s.bus.Publish(event.NewSessionCompacted(sessionID))
 	return block, s.store.DCPStats(sessionID), nil
 }
 
@@ -129,6 +133,9 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 		Active:        true,
 	}
 	s.store.AddCompressionBlock(sessionID, block)
+	// Emit events
+	s.bus.Publish(event.NewSessionCompact(sessionID, block, s.store.DCPStats(sessionID)))
+	s.bus.Publish(event.NewSessionCompacted(sessionID))
 	stats := s.store.DCPStats(sessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"sessionID": sessionID, "block": block, "stats": stats}})
 }

@@ -33,6 +33,7 @@ const (
 	TypeSessionUpdated     = "session.updated"
 	TypeSessionDeleted     = "session.deleted"
 	TypeSessionCompact      = "session.compact"
+	TypeSessionCompacted    = "session.compacted"
 	TypePermissionAsked    = "permission.asked"
 	TypePermissionUpdated  = "permission.updated"
 	TypePermissionReplied  = "permission.replied"
@@ -83,13 +84,14 @@ type PartDeltaProps struct {
 	Delta     string `json:"delta"`
 }
 
+
+
 type SessionNextReasoningStartedProps struct {
 	Timestamp          int64  `json:"timestamp"`
 	SessionID          string `json:"sessionID"`
 	AssistantMessageID string `json:"assistantMessageID"`
 	ReasoningID        string `json:"reasoningID"`
 }
-
 type SessionNextReasoningDeltaProps struct {
 	Timestamp          int64  `json:"timestamp"`
 	SessionID          string `json:"sessionID"`
@@ -97,7 +99,6 @@ type SessionNextReasoningDeltaProps struct {
 	ReasoningID        string `json:"reasoningID"`
 	Delta              string `json:"delta"`
 }
-
 type SessionNextReasoningEndedProps struct {
 	Timestamp          int64  `json:"timestamp"`
 	SessionID          string `json:"sessionID"`
@@ -160,6 +161,10 @@ type SessionCompactPayload struct {
 	SessionID string         `json:"sessionID"`
 	Block     any            `json:"block,omitempty"`
 	Stats     map[string]any `json:"stats,omitempty"`
+}
+
+type SessionCompactedProps struct {
+	SessionID string `json:"sessionID"`
 }
 
 // PermissionRepliedProps is the properties shape for permission.replied
@@ -246,6 +251,11 @@ func NewSessionError(sessionID string, errPayload any) Event {
 // NewSessionCompact creates a session.compact event with optional block and stats.
 func NewSessionCompact(sessionID string, block any, stats map[string]any) Event {
 	return Event{ID: newID("evt"), Type: TypeSessionCompact, Properties: SessionCompactPayload{SessionID: sessionID, Block: block, Stats: stats}}
+}
+
+// NewSessionCompacted creates a session.compacted event with session ID.
+func NewSessionCompacted(sessionID string) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionCompacted, Properties: SessionCompactedProps{SessionID: sessionID}}
 }
 
 // NewMessagePartDelta creates a message.part.delta event (DROPPABLE).
@@ -383,6 +393,7 @@ type SessionNextTextEndedProps struct {
 	TextID             string `json:"textID"`
 	Text               string `json:"text"`
 }
+
 
 type SessionNextToolInputStartedProps struct {
 	Timestamp          int64  `json:"timestamp"`

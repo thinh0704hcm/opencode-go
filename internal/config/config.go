@@ -245,6 +245,15 @@ func (c Config) DCP() DCPConfig {
     if v, ok := m["customPrompts"].(bool); ok {
         d.CustomPrompts = v
     }
+    if v, ok := m["auto"].(bool); ok {
+        d.Auto = v
+    }
+    if v, ok := m["contextLimit"].(float64); ok {
+        d.ContextLimit = int(v)
+    }
+    if v, ok := m["outputLimit"].(float64); ok {
+        d.OutputLimit = int(v)
+    }
     return d
 }
 

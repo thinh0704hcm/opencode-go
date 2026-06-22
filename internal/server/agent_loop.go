@@ -371,6 +371,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 					prevOutput = tok.Output
 				}
 				s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, finishReason, stepCost, tokens))
+		// Auto-compaction: if token usage exceeds DCP threshold, trigger compaction.
+		if tok != nil && s.isDCPOverflow(s.workdir, tok) {
+			s.compactSession(sessionID, compactRequest{})
+		}
 			}
 			return finishReason
 		}

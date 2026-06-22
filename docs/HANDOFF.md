@@ -137,6 +137,20 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 
 **Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/event/...` ✅
 
+### Slice 13: DCP Parity (Overflow Detection + Auto-Compaction)
+
+**Files touched:**
+- `internal/event/event.go` — session.compacted event type + constructor
+- `internal/server/dcp_handlers.go` — emit session.compact + session.compacted events after compression
+- `internal/session/dcp.go` — DCPStats token aggregation (input/output/reasoning/cache)
+- `internal/config/dcp.go` — added Auto, ContextLimit, OutputLimit fields
+- `internal/config/config.go` — parse new DCP fields
+- `internal/server/dcp_overflow.go` — NEW: isDCPOverflow() helper
+- `internal/server/agent_loop.go` — auto-compaction trigger after step-end
+- `internal/server/v2_handlers.go` — context endpoint returns blocks/stats
+
+**Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/session/... ./internal/config/... ./internal/event/...` ✅
+
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
 
