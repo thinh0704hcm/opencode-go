@@ -111,6 +111,8 @@ func New(opts Options) *Server {
 	srv.tools.Register(taskTool{srv: srv})
 	logger.Debug("tool registered", "name", "delegate")
 	logger.Debug("tool registered", "name", "task")
+	srv.tools.Register(todoWriteTool{srv: srv})
+	srv.tools.Register(todoReadTool{srv: srv})
 	return srv
 }
 

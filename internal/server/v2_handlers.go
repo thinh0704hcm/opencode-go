@@ -249,7 +249,7 @@ type v2PromptRequest struct {
 }
 
 type sessionInputAdmitted struct {
-	AdmittedSeq int64  `json:"admittedSeq"`
+	AdmittedSeq uint64 `json:"admittedSeq"`
 	ID          string `json:"id"`
 	SessionID   string `json:"sessionID"`
 	Prompt      struct {

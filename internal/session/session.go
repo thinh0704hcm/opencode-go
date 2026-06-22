@@ -51,6 +51,7 @@ type MsgPath struct {
 // ModelID/ProviderID/Mode/Cost/Tokens/Path are assistant-only optional fields
 // (omitempty) so user messages stay clean while the TUI can read tokens.output.
 type Message struct {
+	GlobalSeq  uint64      `json:"globalSeq,omitempty"`
 	ID         string      `json:"id"` // msg_*
 	Role       string      `json:"role"`
 	SessionID  string      `json:"sessionID"`
@@ -82,20 +83,21 @@ type MsgSummary struct {
 
 // Part is a single content part of a message.
 type Part struct {
-	ID          string     `json:"id"` // prt_*
-	MessageID   string     `json:"messageID"`
-	SessionID   string     `json:"sessionID"`
-	Type        string     `json:"type"` // "text" | "reasoning" | "tool" | "step-start" | "step-finish" | "subtask"
-	Text        string     `json:"text,omitempty"`
-	Tool        string     `json:"tool,omitempty"`
-	CallID      string     `json:"callID,omitempty"`
-	Prompt      string     `json:"prompt,omitempty"`
-	Description string     `json:"description,omitempty"`
-	Agent       string     `json:"agent,omitempty"`
-	TargetSessionID string `json:"targetSessionID,omitempty"`
-	Model       *PartModel `json:"model,omitempty"`
-	Command     string     `json:"command,omitempty"`
-	State       *PartState `json:"state,omitempty"`
+	GlobalSeq       uint64     `json:"globalSeq,omitempty"`
+	ID              string     `json:"id"` // prt_*
+	MessageID       string     `json:"messageID"`
+	SessionID       string     `json:"sessionID"`
+	Type            string     `json:"type"` // "text" | "reasoning" | "tool" | "step-start" | "step-finish" | "subtask"
+	Text            string     `json:"text,omitempty"`
+	Tool            string     `json:"tool,omitempty"`
+	CallID          string     `json:"callID,omitempty"`
+	Prompt          string     `json:"prompt,omitempty"`
+	Description     string     `json:"description,omitempty"`
+	Agent           string     `json:"agent,omitempty"`
+	TargetSessionID string     `json:"targetSessionID,omitempty"`
+	Model           *PartModel `json:"model,omitempty"`
+	Command         string     `json:"command,omitempty"`
+	State           *PartState `json:"state,omitempty"`
 	// Time is set on assistant text parts (start, optional end); real user text
 	// parts carry no time, so this stays omitempty to preserve that asymmetry.
 	Time *PartTime `json:"time,omitempty"`

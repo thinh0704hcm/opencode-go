@@ -30,6 +30,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /session/{id}", s.handleSessionDelete)
 	mux.HandleFunc("GET /session/{id}/children", s.handleSessionChildren)
 	mux.HandleFunc("GET /session/{id}/todo", s.handleSessionTodo)
+	mux.HandleFunc("POST /session/{id}/todo", s.handleSessionTodoUpdate)
+	mux.HandleFunc("PATCH /session/{id}/todo", s.handleSessionTodoUpdate)
 	mux.HandleFunc("GET /session/{id}/diff", s.handleSessionDiff)
 	mux.HandleFunc("POST /session/{id}/init", s.handleSessionNoop)
 	mux.HandleFunc("POST /session/{id}/fork", s.handleSessionFork)
@@ -82,6 +84,9 @@ func (s *Server) routes() http.Handler {
 
 	// M2 sub2 boot stubs: empty/exact-shape stubs.
 	mux.HandleFunc("GET /command", s.handleCommand)
+	mux.HandleFunc("GET /skill", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, []any{})
+	})
 	mux.HandleFunc("GET /mcp", s.handleMCP)
 	mux.HandleFunc("POST /mcp/{name}/connect", s.handleMCPConnect)
 	mux.HandleFunc("POST /mcp/{name}/disconnect", s.handleMCPDisconnect)
@@ -171,6 +176,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/session", s.handleV2SessionCreate)
 	mux.HandleFunc("GET /api/session/{sessionID}", s.handleV2SessionGet)
 	mux.HandleFunc("POST /api/session/{sessionID}/prompt", s.handleV2SessionPrompt)
+	mux.HandleFunc("GET /api/session/{id}/todo", s.handleSessionTodo)
+	mux.HandleFunc("POST /api/session/{id}/todo", s.handleSessionTodoUpdate)
+	mux.HandleFunc("PATCH /api/session/{id}/todo", s.handleSessionTodoUpdate)
 	mux.HandleFunc("GET /api/session/{sessionID}/wait", s.handleV2SessionWait)
 	mux.HandleFunc("GET /api/session/{sessionID}/message", s.handleV2SessionMessages)
 	mux.HandleFunc("GET /api/session/{sessionID}/event", s.handleV2SessionEvent)

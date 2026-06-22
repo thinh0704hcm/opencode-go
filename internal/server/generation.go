@@ -121,7 +121,7 @@ func (s *Server) runGenerationAsync(sessionID, parentID, resumeID, providerID, m
 // queue is currently empty, it starts the turn immediately. It returns the
 // admitted sequence number and true if admitted. It returns false if
 // delivery=="steer" and the session is already busy.
-func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string) (int64, bool) {
+func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string) (uint64, bool) {
 	s.sesMu.Lock()
 	defer s.sesMu.Unlock()
 
@@ -138,8 +138,7 @@ func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID
 		return 0, false
 	}
 
-	w.admitSeq++
-	seq := w.admitSeq
+	seq := s.store.NextSeq()
 
 	task := &generationTask{
 		parentID:   parentID,
@@ -202,7 +201,6 @@ type sessionWork struct {
 	sessionID string
 	running   bool
 	draining  bool
-	admitSeq  int64
 	queue     []*generationTask
 }
 

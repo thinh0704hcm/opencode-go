@@ -30,6 +30,7 @@ const (
 	TypeSessionCreated     = "session.created"
 	TypeSessionUpdated     = "session.updated"
 	TypeSessionDeleted     = "session.deleted"
+	TypeSessionCompact      = "session.compact"
 	TypePermissionAsked    = "permission.asked"
 	TypePermissionUpdated  = "permission.updated"
 	TypePermissionReplied  = "permission.replied"
@@ -55,6 +56,20 @@ const (
 	TypeSessionNextReasoningDelta   = "session.next.reasoning.delta"
 	TypeSessionNextReasoningEnded   = "session.next.reasoning.ended"
 )
+
+// Todo event types
+const (
+	TypeTodoUpdated = "todo.updated"
+)
+
+type TodoUpdatedProps struct {
+	SessionID string `json:"sessionID"`
+	Todos     any    `json:"todos"`
+}
+
+func NewTodoUpdated(sessionID string, todos any) Event {
+	return Event{ID: newID("evt"), Type: TypeTodoUpdated, Properties: TodoUpdatedProps{SessionID: sessionID, Todos: todos}}
+}
 
 // PartDeltaProps is the properties shape for message.part.delta.
 // All fields required per architecture §7.1.
@@ -138,6 +153,13 @@ type SessionErrorProps struct {
 	Error     any    `json:"error"`
 }
 
+// SessionCompactPayload carries optional block and stats for compression notifications.
+type SessionCompactPayload struct {
+	SessionID string         `json:"sessionID"`
+	Block     any            `json:"block,omitempty"`
+	Stats     map[string]any `json:"stats,omitempty"`
+}
+
 // PermissionRepliedProps is the properties shape for permission.replied
 // (B2-corrected: sessionID, requestID, reply).
 type PermissionRepliedProps struct {
@@ -212,6 +234,11 @@ func NewSessionDeleted(sessionID string, info any) Event {
 // NewSessionError creates a session.error event.
 func NewSessionError(sessionID string, errPayload any) Event {
 	return Event{ID: newID("evt"), Type: TypeSessionError, Properties: SessionErrorProps{SessionID: sessionID, Error: errPayload}}
+}
+
+// NewSessionCompact creates a session.compact event with optional block and stats.
+func NewSessionCompact(sessionID string, block any, stats map[string]any) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionCompact, Properties: SessionCompactPayload{SessionID: sessionID, Block: block, Stats: stats}}
 }
 
 // NewMessagePartDelta creates a message.part.delta event (DROPPABLE).

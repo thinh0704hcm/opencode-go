@@ -17,6 +17,10 @@ import (
 // before the gate default-denies.
 const permTimeout = 90 * time.Second
 
+// doomLoopThreshold is the number of consecutive identical tool calls that
+// triggers the doom-loop permission prompt, matching TS processor.ts:35.
+const doomLoopThreshold = 3
+
 // runAgentLoop drives the bounded, permission-gated tool-calling loop against an
 // ALREADY-CREATED assistant message. The caller is responsible for publishing
 // the assistant message + busy status beforehand and for finishGeneration +
@@ -144,12 +148,44 @@ func joinTexts(texts []string) string {
 	return sb.String()
 }
 
+// detectDoomLoop checks whether the last N tool parts on the current assistant
+// message are identical (same tool name + same JSON input), which indicates the
+// model is stuck in a repeat loop. Returns true if doom loop is detected.
+func (s *Server) detectDoomLoop(sessionID, messageID, toolName string, input []byte) bool {
+	parts := s.store.MessageParts(sessionID, messageID)
+	if len(parts) < doomLoopThreshold {
+		return false
+	}
+	recent := parts[len(parts)-doomLoopThreshold:]
+	// Normalize the incoming input the same way we normalize stored input,
+	// so JSON key ordering differences don't cause false negatives.
+	var normalizedInput map[string]any
+	if json.Unmarshal(input, &normalizedInput) != nil {
+		return false
+	}
+	inputStr, _ := json.Marshal(normalizedInput)
+	for _, p := range recent {
+		if p.Type != "tool" || p.Tool != toolName {
+			return false
+		}
+		if p.State == nil || p.State.Status == "pending" || p.State.Status == "running" {
+			return false
+		}
+		partInput, _ := json.Marshal(p.State.Input)
+		if string(partInput) != string(inputStr) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsgID, modelID string, texts []string, images []string, callerSystem string, agent Agent, prebuiltMessages ...[]provider.ChatMessage) string {
 	var messages []provider.ChatMessage
 	if len(prebuiltMessages) > 0 && prebuiltMessages[0] != nil {
 		messages = prebuiltMessages[0]
 	} else {
 		messages = s.chatHistory(sessionID, userMsgID, texts, images)
+		messages = s.DCPHooks().ChatMessages(s.workdir, sessionID, messages)
 	}
 
 	sb, err := tool.New(s.workdir)
@@ -179,15 +215,27 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 
 	var prevInput, prevOutput int64
 
+	stepIdx := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return "aborted"
+		default:
+		}
 		s.bus.Publish(event.NewSessionNextStepStarted(sessionID, messageID, agent.Name, modelID, providerID))
+		if stepIdx > 0 {
+			if part, ok := s.store.AppendStepStart(sessionID, messageID); ok {
+				s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
+			}
+		}
+		stepIdx++
 		stepStartInput := prevInput
 		stepStartOutput := prevOutput
 
 		req := provider.ChatRequest{
 			Model:     modelID,
 			Messages:  messages,
-			System:    combineSystem(buildSystemPrompt(s.workdir, agent.Prompt), callerSystem),
+			System: s.DCPHooks().SystemPrompt(s.workdir, combineSystem(buildSystemPrompt(s.workdir, agent.Prompt), callerSystem)),
 			Tools:     toolSchemas(s.tools, agent.toolAllowed),
 			MaxTokens: s.maxTokens,
 		}
@@ -301,7 +349,8 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		}
 
 		if textID != "" {
-			s.bus.Publish(event.NewSessionNextTextEnded(sessionID, messageID, textID, textBuf.String()))
+				    finalText := s.DCPHooks().TextComplete(textBuf.String())
+				    s.bus.Publish(event.NewSessionNextTextEnded(sessionID, messageID, textID, finalText))
 			textID = ""
 			textBuf.Reset()
 		}
@@ -345,7 +394,29 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			messages = append(messages, provider.ChatMessage{Role: "assistant", ToolCalls: tcs, ReasoningContent: reasoning.String()})
 		}
 
-		for _, call := range calls {
+		for i := range calls {
+			call := calls[i]
+			select {
+			case <-ctx.Done():
+				for _, rc := range calls[i:] {
+					var toolInput map[string]any
+					_ = json.Unmarshal(rc.Input, &toolInput)
+					p, _ := s.store.AppendToolPart(sessionID, messageID, rc.Name, rc.ID, "error", toolInput, "Tool execution aborted")
+					// TS parity: processor.ts:907 sets metadata.interrupted=true on aborted tool parts.
+					if p.State != nil {
+						if p.State.Metadata == nil {
+							p.State.Metadata = make(map[string]any)
+						}
+						p.State.Metadata["interrupted"] = true
+					}
+					s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+					s.bus.Publish(event.NewSessionNextToolFailed(sessionID, messageID, rc.ID, "Tool execution aborted"))
+					messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: rc.ID, Name: rc.Name, Content: "Tool execution aborted"})
+				}
+				return "aborted"
+			default:
+			}
+
 			var toolInput map[string]any
 			_ = json.Unmarshal(call.Input, &toolInput)
 
@@ -371,10 +442,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 						partModelID = modelStr
 					}
 				}
-				
+
 				part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, partProviderID, partModelID, "")
 				s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
-				
+
 				// We ALSO create a standard tool part so state machines understand this is a running operation.
 				// By convention, tools that spawn subtasks shouldn't bypass the tool lifecycle entirely.
 				// The prompt says: "In internal/server/agent_loop.go, stop bypassing normal ToolPart lifecycle for delegate/task. Treat them as normal tools for state tracking: running -> completed/error via AppendToolPart, publish existing tool events with SDK-required fields if event structs support it."
@@ -383,6 +454,37 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			s.bus.Publish(event.NewSessionNextToolInputStarted(sessionID, messageID, call.ID, call.Name))
 			s.bus.Publish(event.NewSessionNextToolInputEnded(sessionID, messageID, call.ID, string(call.Input)))
 			s.bus.Publish(event.NewSessionNextToolCalled(sessionID, messageID, call.ID, call.Name, toolInput))
+
+			// compute permSessID before doom loop check
+			permSessID := permSessionIDFromCtx(ctx)
+			if permSessID == "" {
+				permSessID = sessionID
+			}
+
+			// Doom-loop detection: if the last 3 completed tool parts have the same name and identical input, ask the user before continuing.
+			if s.detectDoomLoop(sessionID, messageID, call.Name, call.Input) {
+				doomReq := s.perms.Ask("per_"+call.ID+"_doom", permSessID, "doom_loop")
+				doomObj := map[string]any{
+					"id":        doomReq.ID,
+					"sessionID": permSessID,
+					"permission": "doom_loop",
+					"patterns":   []any{"Continue after repeated failures?"},
+					"metadata":   map[string]any{"tool": call.Name},
+					"tool": map[string]any{"messageID": messageID, "callID": call.ID},
+				}
+				s.bus.Publish(event.NewPermissionAsked(doomObj))
+				s.bus.Publish(event.NewPermissionUpdated(map[string]any{"id": doomReq.ID, "status": "pending", "request": doomObj, "response": nil}))
+				doomReply := s.perms.Wait(ctx, doomReq, permTimeout)
+				s.bus.Publish(event.NewPermissionReplied(permSessID, doomReq.ID, doomReply))
+				if doomReply == "reject" {
+					out := "doom loop detected: repeated identical tool calls"
+					p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)
+					s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
+					messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
+					continue
+				}
+				// "once" or "always" → proceed to normal execution
+			}
 
 			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", toolInput, "")
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
@@ -395,13 +497,7 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				continue
 			}
 
-			// For sub-sessions (delegate/task), permSessID is the parent session's
-			// ID. This lets us inherit "always allow" grants and show permission
-			// dialogs on the parent's TUI panel rather than the invisible sub-session.
-			permSessID := permSessionIDFromCtx(ctx)
-			if permSessID == "" {
-				permSessID = sessionID
-			}
+
 			if needsPermission(s.tools, call.Name) &&
 				!s.perms.IsAllowed(sessionID, call.Name) &&
 				!s.perms.IsAllowed(permSessID, call.Name) {
@@ -497,12 +593,17 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 			} else {
 				s.bus.Publish(event.NewSessionNextToolSuccess(sessionID, messageID, call.ID, out))
 			}
-			
+
 			p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, status, toolInput, out)
 			s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
 
 			s.store.PersistSession(sessionID) // checkpoint: survive a kill mid-turn
 			messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
+		}
+		select {
+		case <-ctx.Done():
+			return "aborted"
+		default:
 		}
 		// Tool results have been committed; the next iteration cannot safely retry
 		// from scratch because tool calls have side effects.

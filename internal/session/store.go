@@ -13,10 +13,15 @@ import (
 // Store is an in-memory session/message store guarded by an RWMutex.
 // On-disk persistence is NOT implemented for M1 (architecture §2.2).
 type Store struct {
+	dcpBlocks map[string][]CompressionBlock
+	nextSeq    uint64 // monotonic global sequence
 	mu         sync.RWMutex
 	sessions   map[string]*Session
 	messages   map[string][]*MessageWithParts // ses_* -> ordered messages
 	persistDir string                         // when non-empty, sessions are persisted to <persistDir>/sessions/*.json
+
+	goals map[string][]Goal
+	todos map[string][]Todo
 }
 
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -94,10 +99,20 @@ func nextMS() int64 {
 }
 
 // NewStore creates an empty store.
+func (s *Store) NextSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextSeq++
+	return s.nextSeq
+}
+
 func NewStore() *Store {
 	return &Store{
+		dcpBlocks: make(map[string][]CompressionBlock),
 		sessions: make(map[string]*Session),
 		messages: make(map[string][]*MessageWithParts),
+		goals:    make(map[string][]Goal),
+		todos:    make(map[string][]Todo),
 	}
 }
 
@@ -174,184 +189,6 @@ func (s *Store) DropTextAndReasoningParts(sessionID, messageID string) {
 	mwp.Parts = kept
 }
 
-// PersistAll persists every session to disk. Called at graceful shutdown so no
-// conversation data is lost on restart.
-func (s *Store) PersistAll() {
-	s.mu.RLock()
-	ids := make([]string, 0, len(s.sessions))
-	for id := range s.sessions {
-		ids = append(ids, id)
-	}
-	s.mu.RUnlock()
-	for _, id := range ids {
-		s.PersistSession(id)
-	}
-}
-
-// List returns a snapshot copy of all sessions sorted by Time.Created
-// (ascending). Callers receive value copies, so the slice is safe to mutate.
-func (s *Store) List() []Session {
-	s.mu.RLock()
-	out := make([]Session, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		out = append(out, *sess)
-	}
-	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Time.Created < out[j].Time.Created
-	})
-	return out
-}
-
-// Children returns all sessions whose ParentID equals parentID, sorted by creation time.
-func (s *Store) Children(parentID string) []Session {
-	s.mu.RLock()
-	out := make([]Session, 0)
-	for _, sess := range s.sessions {
-		if sess.ParentID == parentID {
-			out = append(out, *sess)
-		}
-	}
-	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Time.Created < out[j].Time.Created
-	})
-	return out
-}
-
-// GetSession returns a copy of the session and whether it exists.
-func (s *Store) GetSession(id string) (Session, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sess, ok := s.sessions[id]
-	if !ok {
-		return Session{}, false
-	}
-	return *sess, true
-}
-
-// GetSessionChildren returns all child sessions of a parent.
-func (s *Store) GetSessionChildren(parentID string) []Session {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var children []Session
-	for _, ses := range s.sessions {
-		if ses.ParentID == parentID {
-			children = append(children, *ses)
-		}
-	}
-	// Bubble sort for simplicity since list is usually small
-	for i := 0; i < len(children)-1; i++ {
-		for j := i + 1; j < len(children); j++ {
-			if children[i].Time.Created > children[j].Time.Created {
-				children[i], children[j] = children[j], children[i]
-			}
-		}
-	}
-	return children
-}
-
-// UpdateTitle updates the session and bumps Time.Updated, returning a copy of
-// the updated session and whether it existed. A nil title leaves the existing
-// title unchanged (the PATCH field was omitted); a non-nil title is applied.
-func (s *Store) UpdateTitle(id string, title *string) (Session, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, ok := s.sessions[id]
-	if !ok {
-		return Session{}, false
-	}
-	if title != nil {
-		sess.Title = *title
-	}
-	sess.Time.Updated = nowMS()
-	s.sessions[id] = sess
-	return *sess, true
-}
-
-func (s *Store) UpdateSessionTitle(id, title string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, ok := s.sessions[id]
-	if !ok {
-		return false
-	}
-	sess.Title = title
-	sess.Time.Updated = nowMS()
-	s.sessions[id] = sess
-	return true
-}
-
-// Delete removes a session and its messages. Returns whether it existed.
-func (s *Store) Delete(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.sessions[id]; !ok {
-		return false
-	}
-	delete(s.sessions, id)
-	delete(s.messages, id)
-	return true
-}
-
-// GetMessage returns a deep copy of a single message's {info, parts} and whether
-// it exists, matching Messages() deep-copy-on-read semantics (architecture §2.2).
-func (s *Store) GetMessage(sessionID, messageID string) (MessageWithParts, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	mwp := s.findMessageLocked(sessionID, messageID)
-	if mwp == nil {
-		return MessageWithParts{}, false
-	}
-	return copyMessage(mwp), true
-}
-
-// AppendUserMessage appends a user message built from the prompt text parts and
-// returns a copy of the stored MessageWithParts.
-func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID, agentName string, texts []string) (MessageWithParts, bool) {
-	now := nextMS()
-	if messageID == "" {
-		messageID = NewID("msg")
-	}
-	if agentName == "" {
-		agentName = "build"
-	}
-	mwp := &MessageWithParts{
-		Info: Message{
-			ID:        messageID,
-			Role:      "user",
-			SessionID: sessionID,
-			Time:      Time{Created: now},
-			Agent:     agentName,
-			Summary:   &MsgSummary{Diffs: []any{}},
-		},
-	}
-	if providerID != "" && modelID != "" {
-		mwp.Info.Model = &MsgModel{ProviderID: providerID, ModelID: modelID}
-	}
-	for _, t := range texts {
-		mwp.Parts = append(mwp.Parts, Part{
-			ID:        NewID("prt"),
-			MessageID: messageID,
-			SessionID: sessionID,
-			Type:      "text",
-			Text:      t,
-		})
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.sessions[sessionID]; !ok {
-		return MessageWithParts{}, false
-	}
-	s.messages[sessionID] = append(s.messages[sessionID], mwp)
-	if sess := s.sessions[sessionID]; sess != nil && strings.TrimSpace(sess.Title) == "" {
-		sess.Title = sessionTitleFromTexts(texts)
-		sess.Time.Updated = nowMS()
-	}
-	return copyMessage(mwp), true
-}
-
 // RemoveMessage removes a message and its parts from a session.
 func (s *Store) RemoveMessage(sessionID, messageID string) bool {
 	s.mu.Lock()
@@ -410,6 +247,9 @@ func (s *Store) NewAssistantMessage(sessionID, parentID, providerID, modelID, ag
 	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.nextSeq++
+	mwp.Info.GlobalSeq = s.nextSeq
+	mwp.Parts[0].GlobalSeq = s.nextSeq // step-start part
 	if _, ok := s.sessions[sessionID]; !ok {
 		return MessageWithParts{}, false
 	}
@@ -437,9 +277,51 @@ func (s *Store) CopyMessage(targetSessionID string, m MessageWithParts) {
 	s.messages[targetSessionID] = append(s.messages[targetSessionID], &newMsg)
 }
 
-// AppendTextDelta appends delta text to the assistant message's text part,
-// creating the part if needed. Returns a copy of the full part and the message
-// id. Field is "text" or "reasoning".
+// AppendUserMessage appends user message with optional text parts.
+// Returns a copy of the created message and true if successful.
+func (s *Store) AppendUserMessage(sessionID, messageID, providerID, modelID, agentName string, texts []string) (MessageWithParts, bool) {
+	now := nextMS()
+	if messageID == "" {
+		messageID = NewID("msg")
+	}
+	if agentName == "" {
+		agentName = "build"
+	}
+	mwp := &MessageWithParts{
+		Info: Message{
+			ID:        messageID,
+			Role:      "user",
+			SessionID: sessionID,
+			Time:      Time{Created: now},
+			Agent:     agentName,
+			Summary:   &MsgSummary{Diffs: []any{}},
+		},
+	}
+	if providerID != "" && modelID != "" {
+		mwp.Info.Model = &MsgModel{ProviderID: providerID, ModelID: modelID}
+	}
+	for _, t := range texts {
+		mwp.Parts = append(mwp.Parts, Part{
+			ID:        NewID("prt"),
+			MessageID: messageID,
+			SessionID: sessionID,
+			Type:      "text",
+			Text:      t,
+		})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextSeq++
+	mwp.Info.GlobalSeq = s.nextSeq
+	for i := range mwp.Parts {
+		mwp.Parts[i].GlobalSeq = s.nextSeq
+	}
+	if _, ok := s.sessions[sessionID]; !ok {
+		return MessageWithParts{}, false
+	}
+	s.messages[sessionID] = append(s.messages[sessionID], mwp)
+	return copyMessage(mwp), true
+}
 func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -460,13 +342,14 @@ func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part
 		}
 	}
 	if p == nil {
+		s.nextSeq++
 		mwp.Parts = append(mwp.Parts, Part{
 			ID:        NewID("prt"),
 			MessageID: messageID,
 			SessionID: sessionID,
 			Type:      partType,
-			// Assistant text parts carry a start time (user text parts do not).
-			Time: &PartTime{Start: nextMS()},
+			Time:      &PartTime{Start: nextMS()},
+			GlobalSeq: s.nextSeq,
 		})
 		p = &mwp.Parts[len(mwp.Parts)-1]
 	}
@@ -505,8 +388,8 @@ func (s *Store) UpdateSubtaskTarget(sessionID, messageID, prompt, targetSessionI
 	if mwp == nil {
 		return Part{}, false
 	}
-	
-	for i := len(mwp.Parts)-1; i >= 0; i-- {
+
+	for i := len(mwp.Parts) - 1; i >= 0; i-- {
 		if mwp.Parts[i].Type == "subtask" && mwp.Parts[i].Prompt == prompt {
 			mwp.Parts[i].TargetSessionID = targetSessionID
 			return mwp.Parts[i], true
@@ -520,6 +403,7 @@ func (s *Store) UpdateSubtaskTarget(sessionID, messageID, prompt, targetSessionI
 func (s *Store) AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, providerID, modelID, targetSessionID string) (Part, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.nextSeq++
 	mwp := s.findMessageLocked(sessionID, messageID)
 	if mwp == nil {
 		return Part{}, false
@@ -534,6 +418,7 @@ func (s *Store) AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName,
 		Description:     desc,
 		Agent:           agentName,
 		TargetSessionID: targetSessionID,
+		GlobalSeq:       s.nextSeq,
 	}
 	if providerID != "" || modelID != "" {
 		part.Model = &PartModel{
@@ -622,6 +507,7 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 		state.Metadata = map[string]any{}
 	}
 
+	s.nextSeq++
 	mwp.Parts = append(mwp.Parts, Part{
 		ID:        NewID("prt"),
 		MessageID: messageID,
@@ -630,17 +516,39 @@ func (s *Store) AppendToolPart(sessionID, messageID, toolName, callID, status st
 		Tool:      toolName,
 		CallID:    callID,
 		State:     state,
+		GlobalSeq: s.nextSeq,
 	})
 	p := &mwp.Parts[len(mwp.Parts)-1]
 	return copyPart(*p), true
 }
 
-// AppendStepFinish appends a step-finish part (carrying reason/cost/tokens) to
-// the assistant message, mirroring real opencode's terminal part. Returns a
-// copy of the new part and whether the message was found.
+// AppendStepStart appends a step-start part to an existing assistant message.
+// Returns a copy of the new part and whether the message was found.
+func (s *Store) AppendStepStart(sessionID, messageID string) (Part, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextSeq++
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return Part{}, false
+	}
+	mwp.Parts = append(mwp.Parts, Part{
+		ID:        NewID("prt"),
+		MessageID: messageID,
+		SessionID: sessionID,
+		Type:      "step-start",
+		GlobalSeq: s.nextSeq,
+	})
+	p := &mwp.Parts[len(mwp.Parts)-1]
+	return copyPart(*p), true
+}
+
+// AppendStepFinish appends a step-finish part carrying reason, cost, and tokens.
+// Returns a copy of the new part and whether the message was found.
 func (s *Store) AppendStepFinish(sessionID, messageID, reason string, cost float64, tokens *Tokens) (Part, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.nextSeq++
 	mwp := s.findMessageLocked(sessionID, messageID)
 	if mwp == nil {
 		return Part{}, false
@@ -653,6 +561,7 @@ func (s *Store) AppendStepFinish(sessionID, messageID, reason string, cost float
 		Reason:    reason,
 		Cost:      &cost,
 		Tokens:    tokens,
+		GlobalSeq: s.nextSeq,
 	})
 	p := &mwp.Parts[len(mwp.Parts)-1]
 	return copyPart(*p), true
@@ -717,6 +626,22 @@ func (s *Store) FinishOpenParts(sessionID, messageID string) []Part {
 	return updated
 }
 
+// MessageParts returns a deep copy of all parts for a message. Used by the
+// doom-loop detector to inspect recent tool parts without holding the lock.
+func (s *Store) MessageParts(sessionID, messageID string) []Part {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+    mwp := s.findMessageLocked(sessionID, messageID)
+    if mwp == nil {
+        return nil
+    }
+    out := make([]Part, len(mwp.Parts))
+    for i, p := range mwp.Parts {
+        out[i] = copyPart(p)
+    }
+    return out
+}
+
 // MessageInfo returns a copy of a message's info block.
 func (s *Store) MessageInfo(sessionID, messageID string) (Message, bool) {
 	s.mu.RLock()
@@ -754,6 +679,114 @@ func (s *Store) findMessageLocked(sessionID, messageID string) *MessageWithParts
 		}
 	}
 	return nil
+}
+
+func (s *Store) GetMessage(sessionID, messageID string) (MessageWithParts, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return MessageWithParts{}, false
+	}
+	return copyMessage(mwp), true
+}
+
+func (s *Store) GetSession(id string) (Session, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return Session{}, false
+	}
+	return *sess, true
+}
+
+func (s *Store) List() []Session {
+	s.mu.RLock()
+	out := make([]Session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		out = append(out, *sess)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created < out[j].Time.Created })
+	return out
+}
+
+func (s *Store) Children(parentID string) []Session {
+	s.mu.RLock()
+	out := make([]Session, 0)
+	for _, sess := range s.sessions {
+		if sess.ParentID == parentID {
+			out = append(out, *sess)
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created < out[j].Time.Created })
+	return out
+}
+
+func (s *Store) UpdateTitle(id string, title *string) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return Session{}, false
+	}
+	if title != nil {
+		sess.Title = *title
+	}
+	sess.Time.Updated = nowMS()
+	s.sessions[id] = sess
+	return *sess, true
+}
+
+func (s *Store) UpdateSessionTitle(id, title string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return false
+	}
+	sess.Title = title
+	sess.Time.Updated = nowMS()
+	s.sessions[id] = sess
+	return true
+}
+
+func (s *Store) Delete(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[id]; !ok {
+		return false
+	}
+	delete(s.sessions, id)
+	delete(s.messages, id)
+	return true
+}
+
+func (s *Store) GetSessionChildren(parentID string) []Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var children []Session
+	for _, sess := range s.sessions {
+		if sess.ParentID == parentID {
+			children = append(children, *sess)
+		}
+	}
+	sort.Slice(children, func(i, j int) bool { return children[i].Time.Created < children[j].Time.Created })
+	return children
+}
+
+func (s *Store) PersistAll() {
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	s.mu.RUnlock()
+	for _, id := range ids {
+		s.PersistSession(id)
+	}
 }
 
 func copyMessage(m *MessageWithParts) MessageWithParts {

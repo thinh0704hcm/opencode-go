@@ -126,6 +126,7 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req promptAsyncRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -139,6 +140,19 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 		} else if p.Type == "file" && strings.HasPrefix(p.Mime, "image/") && p.URL != "" {
 			images = append(images, p.URL)
 		}
+	}
+
+	// Validate: at least one non-empty text part required.
+	hasText := false
+	for _, t := range texts {
+		if strings.TrimSpace(t) != "" {
+			hasText = true
+			break
+		}
+	}
+	if !hasText {
+		writeError(w, http.StatusBadRequest, "message content must contain at least one non-empty text part")
+		return
 	}
 
 	modelID := req.Model.ModelID
@@ -196,6 +210,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req promptAsyncRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -209,6 +224,19 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		} else if p.Type == "file" && strings.HasPrefix(p.Mime, "image/") && p.URL != "" {
 			images = append(images, p.URL)
 		}
+	}
+
+	// Validate: at least one non-empty text part required.
+	hasText := false
+	for _, t := range texts {
+		if strings.TrimSpace(t) != "" {
+			hasText = true
+			break
+		}
+	}
+	if !hasText {
+		writeError(w, http.StatusBadRequest, "message content must contain at least one non-empty text part")
+		return
 	}
 
 	modelID := req.Model.ModelID

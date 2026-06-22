@@ -168,7 +168,7 @@ func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false, Error: "empty request body"})
+		writeJSON(w, http.StatusBadRequest, vcsApplyResponse{Applied: false, Error: "empty request body"})
 		return
 	}
 

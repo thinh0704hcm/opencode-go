@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -15,10 +16,42 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.List())
 }
 
-// handleSessionTodo serves GET /session/{id}/todo. No todos feature exists, so
-// it returns an empty JSON array.
+// handleSessionTodo serves GET /session/{id}/todo, returning the session's
+// todo list (empty array when no todos exist).
 func (s *Server) handleSessionTodo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []interface{}{})
+	id := r.PathValue("id")
+	if _, ok := s.store.GetSession(id); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	todos, _ := s.store.GetTodos(id)
+	if todos == nil {
+		todos = []session.Todo{}
+	}
+	writeJSON(w, http.StatusOK, todos)
+}
+
+// handleSessionTodoUpdate serves POST/PATCH /session/{id}/todo and /api/session/{id}/todo
+func (s *Server) handleSessionTodoUpdate(w http.ResponseWriter, r *http.Request) {
+	// support both v1 and v2 path param names
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
+		sessionID = r.PathValue("sessionID")
+	}
+	if _, ok := s.store.GetSession(sessionID); !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	var body struct {
+		Todos []session.Todo `json:"todos"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	s.store.SetTodos(sessionID, body.Todos)
+	s.bus.Publish(event.NewTodoUpdated(sessionID, body.Todos))
+	writeJSON(w, http.StatusOK, body.Todos)
 }
 
 // handleSessionDiff serves GET /session/{id}/diff. It returns the current git

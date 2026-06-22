@@ -1,7 +1,9 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -28,7 +30,21 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 
 // handleConfigUpdate serves PATCH /config.
 func (s *Server) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
-	s.handleTUIOK(w, r)
+	// Validate request body is exactly valid JSON (no trailing junk).
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		var body map[string]any
+		if err := dec.Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		// Reject trailing tokens (e.g. {"a":1}garbage).
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			writeError(w, http.StatusBadRequest, "invalid JSON: trailing data")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 // configProvidersResponse is the GET /config/providers body.

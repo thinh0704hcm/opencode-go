@@ -191,11 +191,63 @@ func (c *Config) Defaulted() map[string]any {
 // Model returns the configured default model string ("providerID/modelID"), or
 // "" if unset.
 func (c *Config) Model() string {
-	if s, ok := c.Raw["model"].(string); ok {
-		return s
-	}
-	return ""
+    if s, ok := c.Raw["model"].(string); ok {
+        return s
+    }
+    return ""
 }
+
+// DCP returns the DCP configuration section.
+func (c Config) DCP() DCPConfig {
+    // defaults per spec
+    d := DCPConfig{
+        Mode:               "range",
+        ErrorPruneTurns:    4,
+        TurnNudgeInterval:  5,
+        CompressPermission: "allow",
+    }
+    raw, ok := c.Raw["dcp"]
+    if !ok {
+        return d
+    }
+    m, ok := raw.(map[string]any)
+    if !ok {
+        return d
+    }
+    if v, ok := m["enabled"].(bool); ok {
+        d.Enabled = v
+    }
+    if v, ok := m["mode"].(string); ok {
+        d.Mode = v
+    }
+    if v, ok := m["protectUserMessages"].(bool); ok {
+        d.ProtectUserMessages = v
+    }
+    if v, ok := m["protectedTools"].([]any); ok {
+        for _, t := range v {
+            if s, ok := t.(string); ok {
+                d.ProtectedTools = append(d.ProtectedTools, s)
+            }
+        }
+    }
+    if v, ok := m["errorPruneTurns"].(float64); ok {
+        d.ErrorPruneTurns = int(v)
+    }
+    if v, ok := m["turnNudgeInterval"].(float64); ok {
+        d.TurnNudgeInterval = int(v)
+    }
+    if v, ok := m["manualMode"].(bool); ok {
+        d.ManualMode = v
+    }
+    if v, ok := m["compressPermission"].(string); ok {
+        d.CompressPermission = v
+    }
+    if v, ok := m["customPrompts"].(bool); ok {
+        d.CustomPrompts = v
+    }
+    return d
+}
+
 
 // ensureObject guarantees key maps to a (possibly empty) JSON object.
 func ensureObject(m map[string]any, key string) {
