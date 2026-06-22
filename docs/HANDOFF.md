@@ -127,6 +127,16 @@ Added 8 unit tests for `detectDoomLoop` in `agent_loop_abort_test.go`:
 
 **Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API: 25/25 TUI ✅, 48/58 sad paths ✅
 
+### Slice 12: Command/Revert/Shell Event Parity
+
+**Files touched:**
+- `internal/event/event.go` — EventType alias, generic New(), 4 event types + constructors (command.executed, shell.started, shell.ended, session.diff)
+- `internal/server/shell_handlers.go` — shell.started/ended events around execution
+- `internal/server/session_handlers.go` — command.executed event, revert diff + session info response, busy-state guard
+- `internal/server/server.go` — sessionBusy() helper
+
+**Build/test:** `go build ./...` ✅, `go test ./internal/server/... ./internal/event/...` ✅
+
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
 

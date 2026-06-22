@@ -256,7 +256,9 @@ func (s *Server) handleSessionAbort(w http.ResponseWriter, r *http.Request) {
 		// Already idle — emit idle confirmation so SSE-watching clients unblock.
 		s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
 		s.bus.Publish(event.NewSessionIdle(id))
-		writeJSON(w, http.StatusOK, true)
+s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
+        s.bus.Publish(event.NewSessionIdle(id))
+        writeJSON(w, http.StatusOK, true)
 		return
 	}
 	work.queue = work.queue[:0]
@@ -288,6 +290,10 @@ func (s *Server) handleSessionRevert(w http.ResponseWriter, r *http.Request) {
         writeError(w, http.StatusNotFound, "session not found")
         return
     }
+    if s.sessionBusy(id) {
+        writeJSON(w, http.StatusConflict, map[string]any{"_tag":"ConflictError","message":"session is busy","resource":"session"})
+        return
+    }
     // Validate JSON content type and payload.
     if !requireJSON(w, r) {
         return
@@ -314,7 +320,9 @@ func (s *Server) handleSessionRevert(w http.ResponseWriter, r *http.Request) {
     }
     // partID is currently unused; validation only.
     _ = req.PartID
-    writeJSON(w, http.StatusOK, true)
+s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
+        s.bus.Publish(event.NewSessionIdle(id))
+        writeJSON(w, http.StatusOK, true)
 }
 
 // handleSessionUnrevert pops the stash created by revert.
@@ -434,4 +442,7 @@ func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
     }
     // Existing behavior: forward to prompt handler.
     s.handlePrompt(w, r)
+    // Publish command executed event after successful prompt handling.
+    id := r.PathValue("id")
+    s.bus.Publish(event.NewCommandExecuted(cmd.Command, id, cmd.Arguments, ""))
 }

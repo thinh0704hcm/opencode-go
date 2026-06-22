@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+type EventType = string
+
 // Event is the single canonical event type. The discriminator is Type;
 // Properties is type-specific. All wire keys use capital-ID casing
 // (sessionID, messageID, partID) per the architecture doc §7.1.
@@ -201,6 +203,11 @@ func base62(n uint64) string {
 // NewServerConnected creates a server.connected event with EMPTY properties.
 func NewServerConnected() Event {
 	return Event{ID: newID("evt"), Type: TypeServerConnected, Properties: struct{}{}}
+}
+
+// New creates a generic event with given type and properties.
+func New(t EventType, props any) Event {
+	return Event{ID: newID("evt"), Type: t, Properties: props}
 }
 
 // NewSessionIdle creates a session.idle event (synthetic terminal signal).
@@ -746,4 +753,73 @@ func NewSessionNextRetried(sessionID string, attempt int, errMsg string, isRetry
 			}{Message: errMsg, IsRetryable: isRetryable},
 		},
 	}
+}
+
+// Command execution events
+const TypeCommandExecuted = "command.executed"
+
+type CommandExecutedProps struct {
+    Name      string `json:"name"`
+    SessionID string `json:"sessionID"`
+    Arguments string `json:"arguments"`
+    MessageID string `json:"messageID"`
+}
+
+func NewCommandExecuted(name, sessionID, arguments, messageID string) Event {
+	return New(TypeCommandExecuted, CommandExecutedProps{
+		Name: name, SessionID: sessionID, Arguments: arguments, MessageID: messageID,
+	})
+}
+
+// Shell events
+const TypeSessionNextShellStarted = "session.next.shell.started"
+const TypeSessionNextShellEnded = "session.next.shell.ended"
+
+type ShellStartedProps struct {
+    Timestamp int64  `json:"timestamp"`
+    SessionID string `json:"sessionID"`
+    MessageID string `json:"messageID"`
+    CallID    string `json:"callID"`
+    Command   string `json:"command"`
+}
+
+func NewSessionNextShellStarted(sessionID, messageID, callID, command string) Event {
+	return New(TypeSessionNextShellStarted, ShellStartedProps{
+		Timestamp: time.Now().UnixMilli(),
+		SessionID: sessionID,
+		MessageID: messageID,
+		CallID:    callID,
+		Command:   command,
+	})
+}
+
+type ShellEndedProps struct {
+    Timestamp int64  `json:"timestamp"`
+    SessionID string `json:"sessionID"`
+    CallID    string `json:"callID"`
+    Output    string `json:"output"`
+}
+
+func NewSessionNextShellEnded(sessionID, callID, output string) Event {
+	return New(TypeSessionNextShellEnded, ShellEndedProps{
+		Timestamp: time.Now().UnixMilli(),
+		SessionID: sessionID,
+		CallID:    callID,
+		Output:    output,
+	})
+}
+
+// Session diff event
+const TypeSessionDiff = "session.diff"
+
+type SessionDiffProps struct {
+    SessionID string `json:"sessionID"`
+    Diff      any    `json:"diff"`
+}
+
+func NewSessionDiff(sessionID string, diff any) Event {
+	return New(TypeSessionDiff, SessionDiffProps{
+		SessionID: sessionID,
+		Diff:      diff,
+	})
 }

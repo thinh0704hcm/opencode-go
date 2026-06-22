@@ -38,6 +38,10 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
         writeError(w, http.StatusNotFound, "session not found")
         return
     }
+    if s.sessionBusy(id) {
+        writeJSON(w, http.StatusConflict, map[string]any{"_tag":"ConflictError","message":"session is busy","resource":"session"})
+        return
+    }
 
     // Validate JSON content type and required fields.
     if !requireJSON(w, r) {
@@ -101,6 +105,9 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
 		s.bus.Publish(event.NewMessagePartUpdated(id, p, time.Now().UnixMilli()))
 	}
 
+	// Publish shell start event before execution.
+	s.bus.Publish(event.NewSessionNextShellStarted(id, messageID, "shell_1", req.Command))
+
 	// Execute the command via the bash tool.
 	input, _ := json.Marshal(map[string]string{"command": req.Command})
 	out, isErr := executeToolCall(r.Context(), s.tools, sb, provider.ToolCall{
@@ -108,6 +115,9 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
 		Name:  "bash",
 		Input: json.RawMessage(input),
 	})
+
+	// Publish shell end event after execution.
+	s.bus.Publish(event.NewSessionNextShellEnded(id, "shell_1", out))
 
 	status := "completed"
 	if isErr {

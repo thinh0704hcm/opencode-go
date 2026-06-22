@@ -138,6 +138,22 @@ func (s *Server) clearCancel(sessionID string) {
 // cancelSession cancels the in-flight turn for a session, returning true if one
 // was registered.
 func (s *Server) cancelSession(sessionID string) bool {
+    // Session busy check helper
+    // Returns true if a generation is currently running for the session.
+    // Used by handlers to guard against concurrent operations.
+    // (wrapper defined below)
+    //
+    // Note: sesMu is a sync.Mutex, not RWMutex, so we lock for safe access.
+    //
+    // sessionBusy is defined after this method.
+    //
+    // -----
+    // sessionBusy implementation follows after cancelSession.
+    // -----
+    // (no functional change to cancelSession itself)
+    //
+    // Added comment only, method unchanged.
+    //
 	s.cancelMu.Lock()
 	c, ok := s.cancels[sessionID]
 	s.cancelMu.Unlock()
@@ -150,6 +166,14 @@ func (s *Server) cancelSession(sessionID string) bool {
 
 // ListenAndServe binds to addr (expected 127.0.0.1:port) and serves until
 // shutdown. Bind address is enforced by the caller (architecture §11).
+// sessionBusy returns true if the session has an active generation running.
+func (s *Server) sessionBusy(id string) bool {
+    s.sesMu.Lock()
+    defer s.sesMu.Unlock()
+    w, ok := s.sesQueue[id]
+    return ok && w.running
+}
+
 func (s *Server) ListenAndServe(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err == nil {
