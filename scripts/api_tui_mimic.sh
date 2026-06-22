@@ -63,7 +63,7 @@ req GET "/session/$SID/diff" "" 200
 
 # 9. TUI: send a message (non-streaming path)
 echo "9. POST /session/$SID/message (user msg)"
-req POST "/session/$SID/message" '{"content":"Hello from TUI test"}' 200
+req POST "/session/$SID/message" '{"parts":[{"type":"text","text":"Hello from TUI test"}]}' 200
 
 # 10. TUI: abort (no-op if nothing running)
 echo "10. POST /session/$SID/abort (no-op)"
@@ -73,10 +73,10 @@ req POST "/session/$SID/abort" "" 200
 echo "11. GET /global/event (SSE 1s connect)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 -H 'Accept: text/event-stream' "$BASE/global/event" 2>/dev/null || echo "000")
 TOTAL=$((TOTAL+1))
-if [[ "$CODE" == "200" || "$CODE" == "000" ]]; then
+if [[ "$CODE" == "200" || "$CODE" == "000" || "$CODE" == "200000" ]]; then
   PASS=$((PASS+1)); echo "  ✅ GET /global/event → $CODE (SSE connect OK)"
 else
-  FAIL=$((FAIL+1)); echo "  ❌ GET /global/event → $CODE (expected 200/000)"
+  FAIL=$((FAIL+1)); echo "  ❌ GET /global/event → $CODE (expected 200/000/200000)"
 fi
 
 # 12. TUI: VCS info

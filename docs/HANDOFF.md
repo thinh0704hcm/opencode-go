@@ -104,6 +104,13 @@
 
 **Build/test:** `go build ./...` ✅, `go test ./internal/server/...` ✅, API scripts: 48/58 + 23/25 ✅
 
+### Slice 10: Test Script Fixes (Sad-Path Completeness)
+
+**Files touched:**
+- `scripts/api_tui_mimic.sh` — fixed TUI 9 (wrong request format), TUI 11 (SSE timing)
+
+**Result:** TUI tests 25/25 ✅, sad paths 48/58 (1MB curl limitation only). All remaining failures are curl limitations, not server bugs.
+
 ### Finding #1: Message Ordering Monotonicity
 - **Verdict:** RESOLVED — monotonic GlobalSeq on every Message/Part, no TOCTOU between admission and store.
 
