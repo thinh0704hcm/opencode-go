@@ -6,6 +6,7 @@ import (
     "fmt"
     "io"
     "net/http"
+    "strings"
     "time"
     "sync/atomic"
 )
@@ -139,6 +140,7 @@ func (c *HTTPClient) call(method string, params any) (json.RawMessage, error) {
         return nil, err
     }
     httpReq.Header.Set("Content-Type", "application/json")
+    httpReq.Header.Set("Accept", "application/json, text/event-stream")
     for k, v := range c.headers {
         httpReq.Header.Set(k, v)
     }
@@ -151,10 +153,25 @@ func (c *HTTPClient) call(method string, params any) (json.RawMessage, error) {
     if err != nil {
         return nil, fmt.Errorf("mcp %q: %s read body: %w", c.name, method, err)
     }
+
+    if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+        if c.headers == nil {
+            c.headers = make(map[string]string)
+        }
+        c.headers["MCP-Session-Id"] = sid
+    }
+
     if resp.StatusCode != http.StatusOK {
         return nil, fmt.Errorf("mcp %q: %s: HTTP %d: %s", c.name, method, resp.StatusCode, body)
     }
     var rpcResp rpcResponse
+    if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+        if idx := bytes.Index(body, []byte("data: ")); idx != -1 {
+            body = body[idx+6:]
+        }
+    }
+
+    // fmt.Printf("DEBUG mcp %s: %s\n", c.name, string(body))
     if err := json.Unmarshal(body, &rpcResp); err != nil {
         return nil, fmt.Errorf("mcp %q: %s decode: %w", c.name, method, err)
     }
