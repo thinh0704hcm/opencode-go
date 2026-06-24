@@ -184,7 +184,7 @@ func (c *StdioClient) Close() error {
         c.cancel()
     }
     if c.cmd != nil {
-        _ = c.cmd.Wait()
+        go func() { _ = c.cmd.Wait() }()
     c.notifyClosed(nil)
     }
     return nil
