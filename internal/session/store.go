@@ -345,10 +345,12 @@ func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part
 	if field == "reasoning" {
 		partType = "reasoning"
 	}
-	// Find existing part of this type, else create.
+	// Find the most recent open (Time.End == nil) part of this type, else create.
+	// Closed parts belong to a previous step; new text must start a fresh part so
+	// multi-step responses keep text and tool calls in chronological order.
 	var p *Part
 	for i := range mwp.Parts {
-		if mwp.Parts[i].Type == partType {
+		if mwp.Parts[i].Type == partType && mwp.Parts[i].Time != nil && mwp.Parts[i].Time.End == nil {
 			p = &mwp.Parts[i]
 			break
 		}
@@ -454,9 +456,36 @@ func (s *Store) UpdateSubtaskTarget(sessionID, messageID, prompt, targetSessionI
 	return Part{}, false
 }
 
+// FinishSubtaskPart sets Time.End on the subtask part identified by callID,
+// recording the wall-clock duration visible to the TUI.
+func (s *Store) FinishSubtaskPart(sessionID, messageID, callID string) (Part, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return Part{}, false
+	}
+	now := nowMS()
+	for i := range mwp.Parts {
+		p := &mwp.Parts[i]
+		if p.Type == "subtask" && p.CallID == callID {
+			if p.Time == nil {
+				p.Time = &PartTime{Start: now}
+			}
+			end := now
+			if end <= p.Time.Start {
+				end = p.Time.Start + 1
+			}
+			p.Time.End = &end
+			return copyPart(*p), true
+		}
+	}
+	return Part{}, false
+}
+
 // AppendSubtaskPart records a subtask delegation part on the assistant message.
 // Returns a copy of the new part and whether the message was found.
-func (s *Store) AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, providerID, modelID, targetSessionID string) (Part, bool) {
+func (s *Store) AppendSubtaskPart(sessionID, messageID, callID, prompt, desc, agentName, providerID, modelID, targetSessionID string) (Part, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextSeq++
@@ -470,11 +499,13 @@ func (s *Store) AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName,
 		MessageID:       messageID,
 		SessionID:       sessionID,
 		Type:            "subtask",
+		CallID:          callID,
 		Prompt:          prompt,
 		Description:     desc,
 		Agent:           agentName,
 		TargetSessionID: targetSessionID,
 		GlobalSeq:       s.nextSeq,
+		Time:            &PartTime{Start: nowMS()},
 	}
 	if providerID != "" || modelID != "" {
 		part.Model = &PartModel{
@@ -765,7 +796,7 @@ func (s *Store) List() []Session {
 		out = append(out, *sess)
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created > out[j].Time.Created })
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created < out[j].Time.Created })
 	return out
 }
 
@@ -778,7 +809,7 @@ func (s *Store) Children(parentID string) []Session {
 		}
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created > out[j].Time.Created })
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created < out[j].Time.Created })
 	return out
 }
 
@@ -845,7 +876,7 @@ func (s *Store) GetSessionChildren(parentID string) []Session {
 			children = append(children, *sess)
 		}
 	}
-	sort.Slice(children, func(i, j int) bool { return children[i].Time.Created > children[j].Time.Created })
+	sort.Slice(children, func(i, j int) bool { return children[i].Time.Created < children[j].Time.Created })
 	return children
 }
 
