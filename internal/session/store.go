@@ -765,7 +765,7 @@ func (s *Store) List() []Session {
 		out = append(out, *sess)
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created < out[j].Time.Created })
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created > out[j].Time.Created })
 	return out
 }
 
@@ -778,7 +778,7 @@ func (s *Store) Children(parentID string) []Session {
 		}
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created < out[j].Time.Created })
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Created > out[j].Time.Created })
 	return out
 }
 
@@ -845,7 +845,7 @@ func (s *Store) GetSessionChildren(parentID string) []Session {
 			children = append(children, *sess)
 		}
 	}
-	sort.Slice(children, func(i, j int) bool { return children[i].Time.Created < children[j].Time.Created })
+	sort.Slice(children, func(i, j int) bool { return children[i].Time.Created > children[j].Time.Created })
 	return children
 }
 
