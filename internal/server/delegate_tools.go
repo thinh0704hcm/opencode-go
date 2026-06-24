@@ -101,11 +101,15 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 	agent.Tools["delegate"] = false
 	agent.Tools["task"] = false
 
+	providerID := s.configuredProviderID
 	modelID := s.model
 	if strings.TrimSpace(in.Model) != "" {
-		modelID = strings.TrimSpace(in.Model)
-		if idx := strings.Index(modelID, "/"); idx >= 0 && idx < len(modelID)-1 {
-			modelID = modelID[idx+1:]
+		rawModel := strings.TrimSpace(in.Model)
+		if idx := strings.Index(rawModel, "/"); idx > 0 && idx < len(rawModel)-1 {
+			providerID = rawModel[:idx]
+			modelID = rawModel[idx+1:]
+		} else {
+			modelID = rawModel
 		}
 	}
 
@@ -152,12 +156,12 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 	}
 
 	// Create initial message in child session.
-	userMsg, ok := s.store.AppendUserMessage(childSessionID, "", s.configuredProviderID, modelID, agent.Name, []string{prompt})
+	userMsg, ok := s.store.AppendUserMessage(childSessionID, "", providerID, modelID, agent.Name, []string{prompt})
 	if !ok {
 		return tool.Result{}, fmt.Errorf("delegate: failed to create user message in child session")
 	}
 
-	asst, ok := s.store.NewAssistantMessage(childSessionID, userMsg.Info.ID, s.configuredProviderID, modelID, agent.Name, mode, false)
+	asst, ok := s.store.NewAssistantMessage(childSessionID, userMsg.Info.ID, providerID, modelID, agent.Name, mode, false)
 	if !ok {
 		return tool.Result{}, fmt.Errorf("delegate: failed to create sub-agent message in child session")
 	}
