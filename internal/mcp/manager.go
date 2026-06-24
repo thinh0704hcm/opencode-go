@@ -185,13 +185,15 @@ func (m *Manager) Add(name string, cfg map[string]any) error {
 func (m *Manager) Connect(name string) (ServerStatus, []tool.Tool) {
     // Acquire lock to fetch config and possibly existing client.
     m.mu.Lock()
-	_, ok := m.configs[name]
+	cfg, ok := m.configs[name]
     if !ok {
         st := ServerStatus{Name: name, Status: "error", Error: "config not found"}
         m.statuses[name] = st
         m.mu.Unlock()
         return st, nil
     }
+    cfg["enabled"] = true
+    m.configs[name] = cfg
     var oldClient MCPClient
     if c, exists := m.clients[name]; exists {
         oldClient = c
@@ -222,6 +224,10 @@ func (m *Manager) Connect(name string) (ServerStatus, []tool.Tool) {
 func (m *Manager) Disconnect(name string) ServerStatus {
     m.mu.Lock()
     defer m.mu.Unlock()
+    if cfg, ok := m.configs[name]; ok {
+        cfg["enabled"] = false
+        m.configs[name] = cfg
+    }
     if c, ok := m.clients[name]; ok {
         _ = c.Close()
         delete(m.clients, name)
