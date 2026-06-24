@@ -1,3 +1,4 @@
+// Blocked: depends on gated daytona.go sandbox handlers.
 //go:build opencode_wip
 
 package server

@@ -185,7 +185,7 @@ func buildProvider(logger *slog.Logger) (provider.Provider, string, string, erro
 			providerID = model[:i]
 			modelID = model[i+1:]
 		}
-		return provider.NewOpenAI("openai", baseURL, apiKey, modelID, &http.Client{Timeout: 0}), modelID, providerID, nil
+		return provider.NewOpenAI(providerID, baseURL, apiKey, modelID, &http.Client{Timeout: 0}), modelID, providerID, nil
 	}
 
 	// Env vars unset: try auto-config from the opencode config + auth.json so
@@ -198,10 +198,14 @@ func buildProvider(logger *slog.Logger) (provider.Provider, string, string, erro
 		}
 	}
 	cfg := config.Load(workdir)
-	if cfgBaseURL, cfgAPIKey, providerID, modelID, _, ok := provider.ResolveDefault(cfg); ok {
-		logger.Info("using provider from opencode config", "provider", providerID, "model", modelID)
-		return provider.NewOpenAI("openai", cfgBaseURL, cfgAPIKey, modelID, &http.Client{Timeout: 0}), modelID, providerID, nil
-	}
+if cfgBaseURL, cfgAPIKey, providerID, modelID, hdrs, ok := provider.ResolveDefault(cfg); ok {
+        logger.Info("using provider from opencode config", "provider", providerID, "model", modelID)
+        p := provider.NewOpenAI(providerID, cfgBaseURL, cfgAPIKey, modelID, &http.Client{Timeout: 0})
+        if len(hdrs) > 0 {
+            p.SetExtraHeaders(hdrs)
+        }
+        return p, modelID, providerID, nil
+    }
 
 	logger.Warn("no provider configured (set OPENCODE_GO_BASE_URL + OPENCODE_GO_API_KEY, or OPENCODE_GO_MOCK=1, or an opencode config default model); falling back to MOCK")
 	return provider.NewMock(""), "mock", "mock", nil

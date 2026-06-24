@@ -115,3 +115,91 @@ func TestSessionPersistRoundTrip(t *testing.T) {
 		t.Fatal("tool part not found after reload")
 	}
 }
+
+func TestNextSeqSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	// Session 1: create messages
+	s1 := NewStore()
+	if err := s1.SetPersistDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	sess := s1.CreateSession("", "Test", "/work")
+	s1.AppendUserMessage(sess.ID, "", "", "", "build", []string{"hello"})
+	s1.NewAssistantMessage(sess.ID, "", "", "", "build", "build")
+	s1.AppendTextDelta(sess.ID, "", "text", "response text")
+	s1.PersistSession(sess.ID)
+
+	// Find max seq in session 1
+	msgs1, _ := s1.Messages(sess.ID)
+	var maxLoadedSeq uint64
+	for _, m := range msgs1 {
+		if m.Info.GlobalSeq > maxLoadedSeq {
+			maxLoadedSeq = m.Info.GlobalSeq
+		}
+		for _, p := range m.Parts {
+			if p.GlobalSeq > maxLoadedSeq {
+				maxLoadedSeq = p.GlobalSeq
+			}
+		}
+	}
+	if maxLoadedSeq == 0 {
+		t.Fatal("expected non-zero max seq in session 1")
+	}
+
+	// Load in fresh store (simulates restart)
+	s2 := NewStore()
+	if err := s2.SetPersistDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create new message in loaded session
+	s2.AppendUserMessage(sess.ID, "", "", "", "build", []string{"after restart"})
+	msgs2, _ := s2.Messages(sess.ID)
+	if len(msgs2) != len(msgs1)+1 {
+		t.Fatalf("expected %d messages, got %d", len(msgs1)+1, len(msgs2))
+	}
+
+	// The new message's GlobalSeq must be > max of loaded seqs
+	newMsg := msgs2[len(msgs2)-1]
+	if newMsg.Info.GlobalSeq <= maxLoadedSeq {
+		t.Errorf("new message GlobalSeq %d <= max loaded GlobalSeq %d", newMsg.Info.GlobalSeq, maxLoadedSeq)
+	}
+}
+
+// TestPersistTodosSurviveRestart verifies todos survive store reload.
+func TestPersistTodosSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	// Write with todos
+	s1 := NewStore()
+	if err := s1.SetPersistDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	sess := s1.CreateSession("ses_test", "", "")
+	s1.SetTodos(sess.ID, []Todo{{Content: "First task", Status: "pending", Priority: ""}, {Content: "Second task", Status: "completed", Priority: ""}})
+	// Persist (SetTodos already persisted)
+	// Load in fresh store
+	s2 := NewStore()
+	if err := s2.SetPersistDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Load(); err != nil {
+		t.Fatal(err)
+	}
+	todos, ok := s2.GetTodos(sess.ID)
+	if !ok {
+		t.Fatal("todos not loaded")
+	}
+	if len(todos) != 2 {
+		t.Fatalf("expected 2 todos, got %d", len(todos))
+	}
+	if todos[0].Content != "First task" {
+		t.Errorf("todo[0].Content = %q, want %q", todos[0].Content, "First task")
+	}
+	if todos[1].Status != "completed" {
+		t.Errorf("todo[1].Status = %q, want %q", todos[1].Status, "completed")
+	}
+}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os/exec"
 	"bufio"
 	"io"
 	"net/http"
@@ -61,6 +62,46 @@ type fileContentResponse struct {
 	Content string `json:"content"`
 }
 
+// handleFileList serves GET /file: lists directory entries.
+type fileListEntry struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Absolute string `json:"absolute"`
+	Type     string `json:"type"`
+	Ignored  bool   `json:"ignored"`
+}
+
+func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
+	root := s.workdir
+	if root == "" {
+		root = "."
+	}
+	dirParam := strings.TrimSpace(r.URL.Query().Get("path"))
+	if dirParam != "" {
+		root = filepath.Join(root, dirParam)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "cannot read directory")
+		return
+	}
+	var results []fileListEntry
+	for _, e := range entries {
+		name := e.Name()
+		if name == ".git" || name == "node_modules" || (name != "." && strings.HasPrefix(name, ".")) {
+			continue
+		}
+		abs, _ := filepath.Abs(filepath.Join(root, name))
+		typ := "file"
+		if e.IsDir() {
+			typ = "directory"
+		}
+		rel, _ := filepath.Rel(s.workdir, filepath.Join(root, name))
+		results = append(results, fileListEntry{Name: name, Path: rel, Absolute: abs, Type: typ, Ignored: false})
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
 // handleFileRead serves GET /file?path=<rel>: returns the contents of a
 // workdir-relative file. Path safety is enforced by the sandbox (no absolute
 // paths, traversal, or symlink escape).
@@ -89,12 +130,21 @@ func (s *Server) handleFileRead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fileContentResponse{Type: "raw", Content: string(data)})
 }
 
-// findMatch is one text-search hit: a workdir-relative path, 1-based line
-// number, and the matching line text.
+// findMatch is one text-search hit with detailed shape.
+type findSubmatch struct {
+	Match struct { Text string `json:"text"` } `json:"match"`
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
+
+
 type findMatch struct {
-	Path string `json:"path"`
-	Line int    `json:"line"`
-	Text string `json:"text"`
+	Path           string    `json:"path"`
+	Lines          string    `json:"lines"`
+	LineNumber    int            `json:"line_number"`
+	AbsoluteOffset int            `json:"absolute_offset"`
+	Submatches    []findSubmatch `json:"submatches"`
 }
 
 // handleFind serves GET /find?pattern=<regex>: a content search rooted at the
@@ -147,7 +197,7 @@ func (s *Server) handleFind(w http.ResponseWriter, r *http.Request) {
 			lineno++
 			line := sc.Text()
 			if re.MatchString(line) {
-				matches = append(matches, findMatch{Path: rel, Line: lineno, Text: line})
+				matches = append(matches, findMatch{Path: rel, Lines: line, LineNumber: lineno, AbsoluteOffset: 0, Submatches: []findSubmatch{{Match: struct{Text string `json:"text"`}{Text: line}, Start: 0, End: len(line)}}})
 				if len(matches) >= maxHits {
 					return filepath.SkipAll
 				}
@@ -162,6 +212,43 @@ func (s *Server) handleFindSymbol(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []any{})
 }
 
+type fileStatusEntry struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Added    bool   `json:"added"`
+	Removed  bool   `json:"removed"`
+	Modified bool   `json:"modified"`
+}
+
 func (s *Server) handleFileStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{})
+	root := s.workdir
+	if root == "" {
+		root = "."
+	}
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		// not a git repo or git error
+		writeJSON(w, http.StatusOK, []fileStatusEntry{})
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var results []fileStatusEntry
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		// format: XY <path>
+		if len(line) < 4 {
+			continue
+		}
+		status := line[:2]
+		path := strings.TrimSpace(line[3:])
+		added := status[0] == 'A' || status[1] == 'A'
+		removed := status[0] == 'D' || status[1] == 'D'
+		modified := (status[0] != ' ' && status[0] != '?' && status[0] != 'A' && status[0] != 'D') || (status[1] != ' ' && status[1] != '?' && status[1] != 'A' && status[1] != 'D')
+		results = append(results, fileStatusEntry{Name: filepath.Base(path), Path: path, Added: added, Removed: removed, Modified: modified})
+	}
+	writeJSON(w, http.StatusOK, results)
 }

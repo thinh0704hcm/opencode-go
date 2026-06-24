@@ -1,3 +1,4 @@
+// Blocked: depends on gated devcontainer.go handlers and request/response types.
 //go:build opencode_wip
 
 package server

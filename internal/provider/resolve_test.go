@@ -5,35 +5,26 @@ import (
 	"testing"
 )
 
-// mockConfig wraps config.Config to override Model() for tests
-type mockConfig struct {
-	*config.Config
-	model string
-}
-
-func (c *mockConfig) Model() string {
-	return c.model
-}
-
 func TestResolveDefault(t *testing.T) {
-	// Test case: Authorization header provided, no apiKey
-	c := &config.Config{
-		Raw: map[string]any{
-			"provider": map[string]any{
-				"myprovider": map[string]any{
-					"options": map[string]any{
-						"baseURL": "https://api.test.com",
-						"headers": map[string]any{
-							"Authorization": "Bearer my-token",
-						},
-					},
-				},
-			},
-		},
-	}
-	mc := &mockConfig{Config: c, model: "myprovider/gpt-4"}
+    // Test case: Authorization header provided, no apiKey
+    c := &config.Config{
+        Raw: map[string]any{
+            "provider": map[string]any{
+                "myprovider": map[string]any{
+                    "options": map[string]any{
+                        "baseURL": "https://api.test.com",
+                        
+                        "headers": map[string]any{
+                            "Authorization": "Bearer my-token",
+                        },
+                    },
+                },
+            },
+            "model": "myprovider/gpt-4",
+        },
+    }
+    baseURL, apiKey, providerID, modelID, headers, ok := ResolveDefault(c)
 
-	baseURL, apiKey, providerID, modelID, headers, ok := ResolveDefault(mc)
 
 	if !ok {
 		t.Fatal("expected ResolveDefault to be ok")

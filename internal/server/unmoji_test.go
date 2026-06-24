@@ -1,3 +1,4 @@
+// Blocked: depends on gated unmoji.go helper.
 //go:build opencode_wip
 
 package server

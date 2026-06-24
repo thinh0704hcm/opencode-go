@@ -1,3 +1,4 @@
+// Blocked: depends on gated worktree.go registry implementation.
 //go:build opencode_wip
 
 package server

@@ -1,3 +1,4 @@
+// Blocked: depends on gated markdown_formatter.go table formatter.
 //go:build opencode_wip
 
 package server

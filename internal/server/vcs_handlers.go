@@ -188,10 +188,11 @@ func (s *Server) handleVCSApply(w http.ResponseWriter, r *http.Request) {
     if diff == "" && strings.TrimSpace(req.Patch) != "" {
         diff = req.Patch
     }
-    if diff == "" {
-writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: false})
-        return
-    }
+if diff == "" {
+		writeJSON(w, http.StatusOK, vcsApplyResponse{Applied: true})
+		return
+	}
+
 
     _, stderr, err := runGit(dir, []byte(diff), "apply")
     if err != nil {

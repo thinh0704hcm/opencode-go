@@ -1,3 +1,4 @@
+// Blocked: depends on gated vibeguard.go redaction helper.
 //go:build opencode_wip
 
 package server

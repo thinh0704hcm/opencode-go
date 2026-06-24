@@ -103,8 +103,8 @@ func TestExecuteToolCallDelegateAndTaskReturnChildText(t *testing.T) {
 		if isErr {
 			t.Fatalf("%s expected success, got error output=%q", call.Name, out)
 		}
-		if !strings.Contains(out, "Delegated task") {
-			t.Fatalf("%s expected delegate task output, got %q", call.Name, out)
+		if !strings.Contains(out, "CHILD_OK") || !strings.Contains(out, `state="completed"`) {
+			t.Fatalf("%s expected child result in completed task wrapper, got %q", call.Name, out)
 		}
 	}
 }

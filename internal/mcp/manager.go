@@ -51,7 +51,7 @@ func NewManager(section map[string]any) *Manager {
         // Store config for later runtime ops.
         m.configs[name] = cfg
         if !mcpEnabled(cfg) {
-            m.statuses[name] = ServerStatus{Name: name, Status: "disconnected"}
+            m.statuses[name] = ServerStatus{Name: name, Status: "disabled"}
             continue
         }
         // Attempt connection for enabled local servers.
@@ -167,7 +167,7 @@ func (m *Manager) Add(name string, cfg map[string]any) error {
     defer m.mu.Unlock()
     m.configs[name] = cfg
     if !mcpEnabled(cfg) {
-        m.statuses[name] = ServerStatus{Name: name, Status: "disconnected"}
+        m.statuses[name] = ServerStatus{Name: name, Status: "disabled"}
         return nil
     }
     // Attempt connection.
@@ -227,7 +227,7 @@ func (m *Manager) Disconnect(name string) ServerStatus {
         delete(m.clients, name)
     }
     delete(m.adapters, name)
-    st := ServerStatus{Name: name, Status: "disconnected"}
+    st := ServerStatus{Name: name, Status: "disabled"}
     m.statuses[name] = st
     return st
 }

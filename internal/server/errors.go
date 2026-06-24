@@ -26,3 +26,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, errorEnvelope{Error: errorBody{Message: msg}})
 }
+
+// writeTaggedError writes an error JSON with a custom _tag and additional fields.
+func writeTaggedError(w http.ResponseWriter, status int, tag string, data map[string]any) {
+    body := map[string]any{"_tag": tag}
+    for k, v := range data {
+        body[k] = v
+    }
+    writeJSON(w, status, body)
+}
+
+// writeSessionBusy writes a 409 Conflict error with SessionBusyError tag.
+func writeSessionBusy(w http.ResponseWriter, sessionID string) {
+    writeTaggedError(w, http.StatusConflict, "SessionBusyError", map[string]any{
+        "sessionID": sessionID,
+        "message":   "Session is busy: " + sessionID,
+    })
+}
+
+// writeSessionNotFound writes a 404 Not Found error with SessionNotFoundError tag.
+func writeSessionNotFound(w http.ResponseWriter, sessionID string) {
+    writeTaggedError(w, http.StatusNotFound, "SessionNotFoundError", map[string]any{
+        "sessionID": sessionID,
+        "message":   "session not found",
+    })
+}

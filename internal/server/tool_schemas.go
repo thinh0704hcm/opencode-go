@@ -183,14 +183,30 @@ var builtinToolSchemas = map[string]provider.ToolSchema{
 	},
 	"webfetch": {
 		Name:        "webfetch",
-		Description: "Fetch the content of a URL and return its text.",
+		Description: "Fetch a URL and return its main content as clean markdown (JS-rendered when needed, via the 9Router web gateway). Use to read articles, docs, or pages.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"url":    map[string]any{"type": "string", "description": "URL to fetch"},
-				"prompt": map[string]any{"type": "string", "description": "What to look for in the page"},
+				"url":            map[string]any{"type": "string", "description": "URL to fetch"},
+				"format":         map[string]any{"type": "string", "description": "markdown (default), text, or html"},
+				"max_characters": map[string]any{"type": "integer", "description": "Optional: truncate output to this many characters"},
+				"provider":       map[string]any{"type": "string", "description": "Optional fetch provider/model (default fetch-combo): firecrawl, jina-reader, tavily, exa"},
 			},
 			"required": []string{"url"},
+		},
+	},
+	"websearch": {
+		Name:        "websearch",
+		Description: "Search the web and return ranked results (title, URL, snippet) via the 9Router web gateway. Use to find current information, articles, or documentation.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query":       map[string]any{"type": "string", "description": "Search query"},
+				"max_results": map[string]any{"type": "integer", "description": "Max results (default 5)"},
+				"search_type": map[string]any{"type": "string", "description": "web (default) or news"},
+				"provider":    map[string]any{"type": "string", "description": "Optional search provider/model (default search-combo): tavily, brave, exa, perplexity"},
+			},
+			"required": []string{"query"},
 		},
 	},
 }

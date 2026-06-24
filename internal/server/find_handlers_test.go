@@ -87,7 +87,7 @@ func TestHandleFind(t *testing.T) {
 	}
 	var got []findMatch
 	json.Unmarshal(rr.Body.Bytes(), &got)
-	if len(got) != 1 || got[0].Line != 2 || !strings.Contains(got[0].Text, "NEEDLE") {
+	if len(got) != 1 || got[0].LineNumber != 2 || !strings.Contains(got[0].Lines, "NEEDLE") {
 		t.Fatalf("want one hit at line 2, got %v", got)
 	}
 	// Missing pattern -> 400.

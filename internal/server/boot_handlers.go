@@ -305,19 +305,60 @@ func parseCommandFrontLine(cmd *commandInfo, line string) {
 	}
 }
 
-// handleFormatter serves GET /formatter -> [].
+// handleFormatter serves GET /formatter -> config-derived formatter entries.
 func (s *Server) handleFormatter(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []any{})
+    s.handleConfigList(w, r, "formatter")
 }
 
-// handleLSP serves GET /lsp -> [].
+// handleLSP serves GET /lsp -> config-derived LSP entries.
 func (s *Server) handleLSP(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []any{})
+    s.handleConfigList(w, r, "lsp")
 }
 
-// handleSessionStatus serves GET /session/status -> {}.
+// handleConfigList reads a key from the config's Raw map and returns it as a JSON array.
+func (s *Server) handleConfigList(w http.ResponseWriter, r *http.Request, key string) {
+    cfg := config.Load(s.workdir)
+    if cfg == nil || cfg.Raw == nil {
+        writeJSON(w, http.StatusOK, []any{})
+        return
+    }
+    raw, ok := cfg.Raw[key]
+    if !ok {
+        writeJSON(w, http.StatusOK, []any{})
+        return
+    }
+    arr, ok := raw.([]any)
+    if !ok || len(arr) == 0 {
+        writeJSON(w, http.StatusOK, []any{})
+        return
+    }
+    writeJSON(w, http.StatusOK, arr)
+}
+
+// handleSessionStatus serves GET /session/status -> { [sessionID]: { type: "busy"|"idle" } }.
+// The TS TUI polls this endpoint to confirm idle state after each turn.
 func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{})
+	s.sesMu.Lock()
+	result := make(map[string]map[string]string)
+	queueSessions := make(map[string]struct{}, len(s.sesQueue))
+	// Add all sessions that have queue entries
+	for sid, w := range s.sesQueue {
+		queueSessions[sid] = struct{}{}
+		if w.running {
+			result[sid] = map[string]string{"type": "busy"}
+		} else {
+			result[sid] = map[string]string{"type": "idle"}
+		}
+	}
+	s.sesMu.Unlock()
+
+	// Add sessions from the store that don't have queue entries (always idle)
+	for _, sess := range s.store.List() {
+		if _, ok := queueSessions[sess.ID]; !ok {
+			result[sess.ID] = map[string]string{"type": "idle"}
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // handleExperimentalResource serves GET /experimental/resource -> {}.
@@ -366,7 +407,11 @@ func (s *Server) handleGlobalConfigUpdate(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleExperimentalConsoleOrgs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, []any{})
+	writeJSON(w, http.StatusOK, map[string]any{"orgs": []any{}})
+}
+
+func (s *Server) handleExperimentalProjectCopyGenerateName(w http.ResponseWriter, r *http.Request) {
+    writeError(w, http.StatusNotImplemented, "not implemented: experimental project copy generate name")
 }
 
 func (s *Server) handleExperimentalSessionList(w http.ResponseWriter, r *http.Request) {

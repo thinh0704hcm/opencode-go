@@ -37,5 +37,23 @@ func TestAppendTextDeltaOrdering(t *testing.T) {
 			t.Errorf("text part %d mismatch: want %q, got %q", i, want, mwp.Parts[i].Text)
 		}
 	}
+}
 
+func TestMonotonicGlobalSeq(t *testing.T) {
+	s := NewStore()
+	s.SetPersistDir(t.TempDir())
+	sess := s.CreateSession("", "Test", "/work")
+	// create 3 assistant messages
+	for i := 0; i < 3; i++ {
+		s.NewAssistantMessage(sess.ID, "", "provider", "model", "build", "build")
+	}
+	msgs, _ := s.Messages(sess.ID)
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].Info.GlobalSeq <= msgs[i-1].Info.GlobalSeq {
+			t.Errorf("message %d GlobalSeq %d <= message %d GlobalSeq %d", i, msgs[i].Info.GlobalSeq, i-1, msgs[i-1].Info.GlobalSeq)
+		}
+	}
 }

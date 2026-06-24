@@ -13,7 +13,7 @@ import (
 // Store is an in-memory session/message store guarded by an RWMutex.
 // On-disk persistence is NOT implemented for M1 (architecture §2.2).
 type Store struct {
-	dcpBlocks map[string][]CompressionBlock
+	dcpBlocks  map[string][]CompressionBlock
 	nextSeq    uint64 // monotonic global sequence
 	mu         sync.RWMutex
 	sessions   map[string]*Session
@@ -109,10 +109,10 @@ func (s *Store) NextSeq() uint64 {
 func NewStore() *Store {
 	return &Store{
 		dcpBlocks: make(map[string][]CompressionBlock),
-		sessions: make(map[string]*Session),
-		messages: make(map[string][]*MessageWithParts),
-		goals:    make(map[string][]Goal),
-		todos:    make(map[string][]Todo),
+		sessions:  make(map[string]*Session),
+		messages:  make(map[string][]*MessageWithParts),
+		goals:     make(map[string][]Goal),
+		todos:     make(map[string][]Todo),
 	}
 }
 
@@ -193,22 +193,23 @@ func (s *Store) DropTextAndReasoningParts(sessionID, messageID string) {
 	mwp.Parts = kept
 }
 
- // RemoveMessage removes a message and its parts from a session.
- func (s *Store) RemoveMessage(sessionID, messageID string) bool {
- 	s.mu.Lock()
- 	defer s.mu.Unlock()
- 	msgs, ok := s.messages[sessionID]
- 	if !ok {
- 		return false
- 	}
- 	for i, m := range msgs {
- 		if m.Info.ID == messageID {
- 			s.messages[sessionID] = append(msgs[:i], msgs[i+1:]...)
- 			return true
- 		}
- 	}
- 	return false
- }
+// RemoveMessage removes a message and its parts from a session.
+func (s *Store) RemoveMessage(sessionID, messageID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, ok := s.messages[sessionID]
+	if !ok {
+		return false
+	}
+	for i, m := range msgs {
+		if m.Info.ID == messageID {
+			s.messages[sessionID] = append(msgs[:i], msgs[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateSession updates a session in the store.
 func (s *Store) UpdateSession(sess Session) {
 	s.mu.Lock()
@@ -216,11 +217,6 @@ func (s *Store) UpdateSession(sess Session) {
 	cp := sess
 	s.sessions[cp.ID] = &cp
 }
-
-
-
-
-
 
 // NewAssistantMessage creates an assistant message (time.completed=null) and
 // appends it. Returns a copy.
@@ -371,6 +367,50 @@ func (s *Store) AppendTextDelta(sessionID, messageID, field, delta string) (Part
 	}
 	p.Text += delta
 	return copyPart(*p), true
+}
+
+// RemovePart removes a part from a message.
+func (s *Store) RemovePart(sessionID, messageID, partID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return false
+	}
+	for i, p := range mwp.Parts {
+		if p.ID == partID {
+			mwp.Parts = append(mwp.Parts[:i], mwp.Parts[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// UpdatePart updates a part's data.
+func (s *Store) UpdatePart(sessionID, messageID, partID string, newPart Part) (Part, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return Part{}, false
+	}
+	for i := range mwp.Parts {
+		if mwp.Parts[i].ID == partID {
+			// Preserve IDs and timestamps if not set in newPart
+			if newPart.ID == "" {
+				newPart.ID = partID
+			}
+			if newPart.MessageID == "" {
+				newPart.MessageID = messageID
+			}
+			if newPart.SessionID == "" {
+				newPart.SessionID = sessionID
+			}
+			mwp.Parts[i] = newPart
+			return copyPart(newPart), true
+		}
+	}
+	return Part{}, false
 }
 
 func toolDisplay(toolName string, input map[string]any, output string) (string, map[string]any) {
@@ -586,7 +626,7 @@ func (s *Store) AppendStepFinish(sessionID, messageID, reason string, cost float
 // SetAssistantUsage sets the token accounting on an assistant message's info
 // from a provider usage object. Reasoning and cache counts stay 0 (the
 // OpenAI-compatible stream does not break those out). No-op if missing.
-func (s *Store) SetAssistantUsage(sessionID, messageID string, input, output, total int) {
+func (s *Store) SetAssistantUsage(sessionID, messageID string, input, output, total, reasoning, cacheRead, cacheWrite int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mwp := s.findMessageLocked(sessionID, messageID)
@@ -597,9 +637,10 @@ func (s *Store) SetAssistantUsage(sessionID, messageID string, input, output, to
 		Total:     int64(total),
 		Input:     int64(input),
 		Output:    int64(output),
-		Reasoning: 0,
-		Cache:     TokenCache{Read: 0, Write: 0},
+		Reasoning: int64(reasoning),
+		Cache:     TokenCache{Read: int64(cacheRead), Write: int64(cacheWrite)},
 	}
+
 }
 
 // returns a copy of its info.
@@ -645,17 +686,17 @@ func (s *Store) FinishOpenParts(sessionID, messageID string) []Part {
 // MessageParts returns a deep copy of all parts for a message. Used by the
 // doom-loop detector to inspect recent tool parts without holding the lock.
 func (s *Store) MessageParts(sessionID, messageID string) []Part {
-    s.mu.RLock()
-    defer s.mu.RUnlock()
-    mwp := s.findMessageLocked(sessionID, messageID)
-    if mwp == nil {
-        return nil
-    }
-    out := make([]Part, len(mwp.Parts))
-    for i, p := range mwp.Parts {
-        out[i] = copyPart(p)
-    }
-    return out
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	mwp := s.findMessageLocked(sessionID, messageID)
+	if mwp == nil {
+		return nil
+	}
+	out := make([]Part, len(mwp.Parts))
+	for i, p := range mwp.Parts {
+		out[i] = copyPart(p)
+	}
+	return out
 }
 
 // MessageInfo returns a copy of a message's info block.
@@ -767,6 +808,21 @@ func (s *Store) UpdateSessionTitle(id, title string) bool {
 	sess.Time.Updated = nowMS()
 	s.sessions[id] = sess
 	return true
+}
+
+// SetSessionCompacting sets (ts != nil) or clears (ts == nil) the session's
+// time.compacting marker that drives the TUI's compaction indicator, and
+// returns the updated session copy.
+func (s *Store) SetSessionCompacting(id string, ts *int64) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return Session{}, false
+	}
+	sess.Time.Compacting = ts
+	sess.Time.Updated = nowMS()
+	return *sess, true
 }
 
 func (s *Store) Delete(id string) bool {

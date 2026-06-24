@@ -61,7 +61,7 @@ func ResolveDefault(cfg *config.Config) (baseURL, apiKey, providerID, modelID st
 		apiKey = authProviderKey(providerID)
 	}
 
-	if baseURL == "" || apiKey == "" {
+	if baseURL == "" {
 		return "", "", "", "", nil, false
 	}
 	return baseURL, apiKey, providerID, modelID, headers, true

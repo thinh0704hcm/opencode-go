@@ -271,10 +271,10 @@ func TestTUIBoot_MCP(t *testing.T) {
 	ts := tuiServer()
 	defer ts.Close()
 
-	var got []any
+	var got map[string]any
 	getJSON(t, ts.URL, "/mcp", &got)
 	if got == nil {
-		t.Error("/mcp returned nil, want array")
+		 t.Error("/mcp returned nil, want object")
 	}
 }
 
@@ -1035,3 +1035,42 @@ func TestTUIStubs_ExactShape(t *testing.T) {
 
 // Dummy check to ensure the test helper references are used.
 var _ = fmt.Sprintf
+
+func TestUnsupportedStubsReturn501(t *testing.T) {
+    ts := tuiServer()
+    defer ts.Close()
+
+    cases := []struct {
+        method string
+        path   string
+        body   string
+    }{
+        {"POST", "/sync/start", "{}"},
+        {"POST", "/sync/replay", "{}"},
+        {"POST", "/sync/steal", "{}"},
+        {"POST", "/question/req_1/reply", `{"answer":"yes"}`},
+        {"POST", "/question/req_1/reject", `{"reason":"no"}`},
+        {"DELETE", "/api/permission/saved/perm_1", ""},
+        // /tui/execute-command is now implemented (publishes tui.command.execute,
+        // returns 200 true) — see TestTUIExecuteCommandPublishes.
+        {"POST", "/experimental/project/proj1/copy/generate-name", "{}"},
+    }
+    for _, c := range cases {
+        var req *http.Request
+        if c.body != "" {
+            req, _ = http.NewRequest(c.method, ts.URL+c.path, strings.NewReader(c.body))
+            req.Header.Set("Content-Type", "application/json")
+        } else {
+            req, _ = http.NewRequest(c.method, ts.URL+c.path, nil)
+        }
+        resp, err := http.DefaultClient.Do(req)
+        if err != nil {
+            t.Fatalf("%s %s: %v", c.method, c.path, err)
+        }
+        resp.Body.Close()
+        if resp.StatusCode != http.StatusNotImplemented {
+            t.Errorf("%s %s = %d, want 501", c.method, c.path, resp.StatusCode)
+        }
+    }
+}
+

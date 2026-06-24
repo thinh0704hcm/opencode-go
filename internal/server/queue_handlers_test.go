@@ -1,3 +1,4 @@
+// Blocked: depends on gated queue_handlers.go task handlers.
 //go:build opencode_wip
 
 package server

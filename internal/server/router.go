@@ -48,22 +48,57 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /session/{id}/revert", s.handleSessionRevert)
 	mux.HandleFunc("POST /session/{id}/unrevert", s.handleSessionUnrevert)
 	mux.HandleFunc("GET /session/{id}/message", s.handleGetMessages)
-	mux.HandleFunc("GET /session/{id}/message/{messageID}", s.handleGetMessage)
+    mux.HandleFunc("GET /session/{id}/message/{messageID}", s.handleGetMessage)
+    // Message mutations
+    mux.HandleFunc("DELETE /session/{id}/message/{messageID}", s.handleDeleteMessage)
+    mux.HandleFunc("DELETE /session/{id}/message/{messageID}/part/{partID}", s.handleDeletePart)
+    mux.HandleFunc("PATCH /session/{id}/message/{messageID}/part/{partID}", s.handleUpdatePart)
 
-	// Read-only file search/read (real-server parity).
+    // Read-only file search/read (real-server parity).
 	mux.HandleFunc("GET /find/file", s.handleFindFile)
 	mux.HandleFunc("GET /find", s.handleFind)
 	mux.HandleFunc("GET /find/symbol", s.handleFindSymbol)
-	mux.HandleFunc("GET /file", s.handleFileRead)
+	mux.HandleFunc("GET /file", s.handleFileList)
 	mux.HandleFunc("GET /file/content", s.handleFileRead)
 	mux.HandleFunc("GET /file/status", s.handleFileStatus)
 
-	// Permission reply: primary + fallback, both wired to one gate (§4.2/B2).
-	mux.HandleFunc("POST /permission/{requestID}/reply", s.handlePermissionReply)
-	mux.HandleFunc("POST /session/{sessionID}/permissions/{permissionID}", s.handlePermissionRespond)
+    // Permission reply: primary + fallback, both wired to one gate (§4.2/B2).
+    mux.HandleFunc("POST /permission/{requestID}/reply", s.handlePermissionReply)
+    mux.HandleFunc("POST /session/{sessionID}/permissions/{permissionID}", s.handlePermissionRespond)
+    
+    // Permission list stub
+    mux.HandleFunc("GET /permission", func(w http.ResponseWriter, r *http.Request) {
+        list := s.perms.List()
+        writeJSON(w, http.StatusOK, list)
+    })
 
-	// M2 boot/config + provider registry (real data; apiKey masked, §3.4/§3.5).
-	mux.HandleFunc("GET /config", s.handleConfigGet)
+    // Sync stubs
+    mux.HandleFunc("POST /sync/start", func(w http.ResponseWriter, r *http.Request) {
+        writeError(w, http.StatusNotImplemented, "not implemented: sync start")
+    })
+    mux.HandleFunc("POST /sync/replay", func(w http.ResponseWriter, r *http.Request) {
+        writeError(w, http.StatusNotImplemented, "not implemented: sync replay")
+    })
+    mux.HandleFunc("POST /sync/steal", func(w http.ResponseWriter, r *http.Request) {
+        writeError(w, http.StatusNotImplemented, "not implemented: sync steal")
+    })
+    mux.HandleFunc("POST /sync/history", func(w http.ResponseWriter, r *http.Request) {
+        writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+    })
+
+    // Question stubs
+    mux.HandleFunc("GET /question", func(w http.ResponseWriter, r *http.Request) {
+        writeJSON(w, http.StatusOK, []any{})
+    })
+    mux.HandleFunc("POST /question/{requestID}/reply", func(w http.ResponseWriter, r *http.Request) {
+        writeError(w, http.StatusNotImplemented, "not implemented: question reply")
+    })
+    mux.HandleFunc("POST /question/{requestID}/reject", func(w http.ResponseWriter, r *http.Request) {
+        writeError(w, http.StatusNotImplemented, "not implemented: question reject")
+    })
+
+    // M2 boot/config + provider registry (real data; apiKey masked, §3.4/§3.5).
+    mux.HandleFunc("GET /config", s.handleConfigGet)
 	mux.HandleFunc("GET /config/providers", s.handleConfigProviders)
 	mux.HandleFunc("GET /provider", s.handleProvider)
 	mux.HandleFunc("GET /agent", s.handleAgent)
@@ -119,16 +154,16 @@ func (s *Server) routes() http.Handler {
 
 	// TUI control long-poll + log sink.
 	mux.HandleFunc("GET /tui/control/next", s.handleTUIControlNext)
-	mux.HandleFunc("POST /tui/control/response", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/append-prompt", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/open-help", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/open-sessions", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/open-themes", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/open-models", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/submit-prompt", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/clear-prompt", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/execute-command", s.handleTUIOK)
-	mux.HandleFunc("POST /tui/show-toast", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/control/response", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/append-prompt", s.handleTUIAppendPrompt)
+	mux.HandleFunc("POST /tui/open-help", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/open-sessions", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/open-themes", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/open-models", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/submit-prompt", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/clear-prompt", s.handleTUIOKBool)
+	mux.HandleFunc("POST /tui/execute-command", s.handleTUIExecuteCommand)
+	mux.HandleFunc("POST /tui/show-toast", s.handleTUIShowToast)
 	mux.HandleFunc("POST /tui/publish", s.handleTUIPublish)
 	mux.HandleFunc("POST /instance/dispose", s.handleTUIOK)
 	mux.HandleFunc("POST /log", s.handleLog)
@@ -149,21 +184,22 @@ func (s *Server) routes() http.Handler {
 
 	// SDK Drop-in: Missing experimental stubs
 	mux.HandleFunc("GET /experimental/console/orgs", s.handleExperimentalConsoleOrgs)
-	mux.HandleFunc("POST /experimental/console/switch", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/console/switch", s.handleTUIOKBool)
 	mux.HandleFunc("GET /experimental/session", s.handleExperimentalSessionList)
-	mux.HandleFunc("POST /experimental/control-plane/move-session", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/control-plane/move-session", s.handleTUIOKBool)
 	mux.HandleFunc("GET /experimental/workspace/adapter", s.handleExperimentalWorkspaceAdapter)
-	mux.HandleFunc("POST /experimental/workspace", s.handleTUIOK)
-	mux.HandleFunc("POST /experimental/workspace/sync-list", s.handleTUIOK)
-	mux.HandleFunc("DELETE /experimental/workspace/{id}", s.handleTUIOK)
-	mux.HandleFunc("POST /experimental/workspace/warp", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/workspace", s.handleTUIOKBool)
+	mux.HandleFunc("POST /experimental/workspace/sync-list", s.handleTUIOKBool)
+	mux.HandleFunc("DELETE /experimental/workspace/{id}", s.handleTUIOKBool)
+	mux.HandleFunc("POST /experimental/workspace/warp", s.handleTUIOKBool)
 	mux.HandleFunc("GET /experimental/worktree", s.handleExperimentalWorktreeList)
-	mux.HandleFunc("POST /experimental/worktree", s.handleTUIOK)
-	mux.HandleFunc("DELETE /experimental/worktree", s.handleTUIOK)
-	mux.HandleFunc("POST /experimental/worktree/reset", s.handleTUIOK)
-	mux.HandleFunc("POST /experimental/project/{projectID}/copy", s.handleTUIOK)
-	mux.HandleFunc("DELETE /experimental/project/{projectID}/copy", s.handleTUIOK)
-	mux.HandleFunc("POST /experimental/project/{projectID}/copy/refresh", s.handleTUIOK)
+	mux.HandleFunc("POST /experimental/worktree", s.handleTUIOKBool)
+	mux.HandleFunc("DELETE /experimental/worktree", s.handleTUIOKBool)
+	mux.HandleFunc("POST /experimental/worktree/reset", s.handleTUIOKBool)
+	mux.HandleFunc("POST /experimental/project/{projectID}/copy", s.handleTUIOKBool)
+	mux.HandleFunc("DELETE /experimental/project/{projectID}/copy", s.handleTUIOKBool)
+	mux.HandleFunc("POST /experimental/project/{projectID}/copy/refresh", s.handleTUIOKBool)
+	mux.HandleFunc("POST /experimental/project/{projectID}/copy/generate-name", s.handleExperimentalProjectCopyGenerateName)
 
 	// v2 API
 	mux.HandleFunc("GET /api/health", s.handleV2Health)
@@ -193,11 +229,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/session/{sessionID}/permission/request", s.handleV2SessionPermissionRequestList)
 	mux.HandleFunc("GET /api/session/{sessionID}/context", s.handleV2SessionContext)
 	mux.HandleFunc("POST /api/session/{sessionID}/compact", s.handleV2SessionCompact)
+	mux.HandleFunc("GET /api/session/{sessionID}/dcp/context", s.handleV2SessionDCPContext)
+	mux.HandleFunc("GET /api/session/{sessionID}/dcp/stats", s.handleV2SessionDCPStats)
+	mux.HandleFunc("POST /api/session/{sessionID}/dcp/sweep", s.handleV2SessionDCPSweep)
+	mux.HandleFunc("POST /api/session/{sessionID}/dcp/decompress", s.handleV2SessionDCPDecompress)
 	mux.HandleFunc("POST /api/session/{sessionID}/permission/request/{requestID}/reply", s.handleV2SessionPermissionReply)
 	mux.HandleFunc("POST /api/session/{sessionID}/question/request/{requestID}/reply", s.handleV2SessionQuestionReply)
 	mux.HandleFunc("POST /api/session/{sessionID}/question/request/{requestID}/reject", s.handleV2SessionQuestionReject)
 	mux.HandleFunc("GET /api/question/request", s.handleV2QuestionRequestList)
-	mux.HandleFunc("POST /tui/select-session", s.handleTUIOK)
+	mux.HandleFunc("POST /tui/select-session", s.handleTUIOKBool)
 	mux.HandleFunc("GET /api/fs/list", s.handleV2FSList)
 	mux.HandleFunc("GET /api/fs/read", s.handleV2FSRead)
 

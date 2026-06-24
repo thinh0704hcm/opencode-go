@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -62,6 +63,17 @@ type delegateInput struct {
 	Description string `json:"description"`
 	Agent       string `json:"agent"`
 	Model       string `json:"model"`
+	// Background, when true AND OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true,
+	// runs the subagent detached and returns immediately. Foreground is the
+	// default (upstream parity: tool/task.ts runs the subagent synchronously and
+	// returns its result before the parent turn continues).
+	Background bool `json:"background"`
+}
+
+// backgroundSubagentsEnabled mirrors upstream's
+// RuntimeFlags.experimentalBackgroundSubagents gate.
+func backgroundSubagentsEnabled() bool {
+	return os.Getenv("OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS") == "true"
 }
 
 func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.Result, error) {
@@ -110,7 +122,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 	// Create child session.
 	childSession := s.store.CreateSession(parentSessionID, fmt.Sprintf("Task: %s", agentName), s.workdir)
 	childSessionID := childSession.ID
-	
+
 	// Update the target session ID in the parent session's store.
 	// We need to find the message ID first.
 	// Find the message ID by getting the last assistant message
@@ -118,7 +130,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 	var updatedPart session.Part
 	var ok bool
 	if msgs, found := s.store.Messages(parentSessionID); found {
-		for i := len(msgs)-1; i >= 0; i-- {
+		for i := len(msgs) - 1; i >= 0; i-- {
 			if msgs[i].Info.Role == "assistant" {
 				msgID = msgs[i].Info.ID
 				break
@@ -150,12 +162,19 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 		return tool.Result{}, fmt.Errorf("delegate: failed to create sub-agent message in child session")
 	}
 
-	// Propagate parent's permission grants.
-	subCtx := withPermSessionID(context.Background(), parentSessionID)
+	// Child context descends from the PARENT tool-call context so a parent abort
+	// cancels the child automatically (not context.Background()). The permission
+	// session ID is the parent's so sub-session grants/asks resolve correctly.
+	subCtx, cancel := context.WithCancel(ctx)
+	subCtx = withPermSessionID(subCtx, parentSessionID)
+	s.registerCancel(childSessionID, cancel)
 
-	go func() {
+	// runChild executes the child agent loop to completion, publishing the full
+	// child-session event stream, and returns the terminal reason ("stop",
+	// "error", "aborted"). Shared by the foreground and background paths.
+	runChild := func() string {
 		defer s.logger.Debug("delegate child run completed", "agent", agentName, "model", modelID, "child_session", childSessionID)
-		
+
 		s.bus.Publish(event.NewSessionCreated(childSessionID, childSession))
 
 		// Publish initial event to child session.
@@ -163,7 +182,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 		for _, part := range userMsg.Parts {
 			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, part, time.Now().UnixMilli()))
 		}
-		
+
 		s.bus.Publish(event.NewMessageUpdated(childSessionID, asst.Info, false))
 		if len(asst.Parts) > 0 {
 			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, asst.Parts[0], time.Now().UnixMilli()))
@@ -180,7 +199,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 		}
 		w.running = true
 		s.sesMu.Unlock()
-		
+
 		s.bus.Publish(event.NewSessionStatus(childSessionID, map[string]string{"type": "busy"}))
 
 		finishReason := s.runAgentLoop(subCtx, childSessionID, asst.Info.ID, userMsg.Info.ID, modelID, []string{prompt}, nil, "", agent)
@@ -192,7 +211,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 		if subCtx.Err() != nil {
 			reason = "aborted"
 		}
-		
+
 		var stepTokens *session.Tokens
 		var stepCost float64
 		if info, ok2 := s.store.MessageInfo(childSessionID, asst.Info.ID); ok2 && info.Tokens != nil {
@@ -206,7 +225,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, sf, time.Now().UnixMilli()))
 		}
 		s.finishGeneration(childSessionID, asst.Info.ID)
-		
+
 		s.sesMu.Lock()
 		// Re-use existing processQueue draining behavior
 		hasMore := len(w.queue) > 0
@@ -214,7 +233,7 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 			w.running = false
 		}
 		s.sesMu.Unlock()
-		
+
 		if hasMore {
 			// Kick off the next task in the background.
 			go s.processQueue(w)
@@ -222,9 +241,67 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 			s.bus.Publish(event.NewSessionStatus(childSessionID, map[string]string{"type": "idle"}))
 			s.bus.Publish(event.NewSessionIdle(childSessionID))
 		}
-	}()
+		return reason
+	}
 
-	return tool.Result{
-		Output: fmt.Sprintf("Delegated task to %s. Session ID: %s. Use delegation_read(id) to read result later.", agentName, childSessionID),
-	}, nil
+	// Background mode: opt-in only (background=true AND experimental flag). Runs
+	// detached and returns immediately. Mirrors upstream BACKGROUND_STARTED.
+	if in.Background && backgroundSubagentsEnabled() {
+		go func() {
+			defer s.clearCancel(childSessionID)
+			defer cancel()
+			runChild()
+		}()
+		return tool.Result{
+			Output: fmt.Sprintf("The task is working in the background (session %s). You will be notified automatically when it finishes. DO NOT poll for progress or duplicate this task's work.", childSessionID),
+		}, nil
+	}
+
+	// Foreground (DEFAULT): run the subagent to completion synchronously and
+	// return its actual result so the parent can use it this turn.
+	defer s.clearCancel(childSessionID)
+	defer cancel()
+	reason := runChild()
+
+	text := s.assistantText(childSessionID, asst.Info.ID)
+	state := "completed"
+	switch {
+	case reason == "aborted" || subCtx.Err() != nil:
+		state = "error"
+		if text == "" {
+			text = "Task was aborted before completion."
+		}
+	case reason == "error":
+		state = "error"
+		if text == "" {
+			text = "Task failed before producing a result."
+		}
+	}
+	return tool.Result{Output: renderTaskResult(childSessionID, state, text)}, nil
+}
+
+// assistantText concatenates the text parts of an assistant message into the
+// final result string (subagent output the parent consumes).
+func (s *Server) assistantText(sessionID, messageID string) string {
+	var b strings.Builder
+	for _, p := range s.store.MessageParts(sessionID, messageID) {
+		if p.Type == "text" {
+			b.WriteString(p.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// renderTaskResult formats a finished subagent result the way upstream's
+// tool/task.ts renderOutput does, so the parent model sees a structured result.
+func renderTaskResult(sessionID, state, text string) string {
+	tag := "task_result"
+	if state == "error" {
+		tag = "task_error"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<task id=%q state=%q>\n", sessionID, state)
+	fmt.Fprintf(&b, "<%s>\n%s\n</%s>\n", tag, text, tag)
+	b.WriteString("</task>")
+	return b.String()
 }

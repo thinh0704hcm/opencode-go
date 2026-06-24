@@ -358,13 +358,10 @@ func (s *Server) handleV2SessionPrompt(w http.ResponseWriter, r *http.Request) {
 		s.publishUserMessage(sessionID, msg)
 	}
 
-	seq, ok := s.startOrQueue(sessionID, targetParentID, resumeID, providerID, modelID, texts, images, "", agent, delivery)
+	seq, ok := s.startOrQueue(sessionID, targetParentID, resumeID, providerID, modelID, texts, images, "", agent, delivery, nil)
 	if !ok {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"_tag":     "ConflictError",
-			"message":  "session is busy",
-			"resource": "session",
-		})
+		s.store.RemoveMessage(sessionID, msgID)
+		writeJSON(w, http.StatusConflict, map[string]any{"_tag": "ConflictError", "message": "session is busy", "resource": "session"})
 		return
 	}
 
@@ -809,13 +806,34 @@ func (s *Server) handleV2ModelList(w http.ResponseWriter, r *http.Request) {
 					info.Limit.Output = int(o)
 				}
 			}
-			info.Cost = []map[string]any{{"input": 0.0, "output": 0.0, "cache": map[string]any{"read": 0.0, "write": 0.0}}}
+			// Cost from config if present
+			if costRaw, ok := m["cost"].(map[string]any); ok {
+				info.Cost = []map[string]any{costRaw}
+			} else {
+				info.Cost = []map[string]any{{"input": 0.0, "output": 0.0, "cache": map[string]any{"read": 0.0, "write": 0.0}}}
+			}
 			info.API.ID = mid
 			info.API.Type = "aisdk"
 			info.API.Package = ""
-			info.Request.Headers = map[string]string{}
+			// Headers from config
+			if headersRaw, ok := m["headers"].(map[string]any); ok {
+				h := make(map[string]string)
+				for k, v := range headersRaw {
+					if s, ok := v.(string); ok {
+						h[k] = s
+					}
+				}
+				info.Request.Headers = h
+			} else {
+				info.Request.Headers = map[string]string{}
+			}
 			info.Request.Body = map[string]any{}
-			info.Variants = []any{}
+			// Variants from config
+			if variantsRaw, ok := m["variants"].([]any); ok {
+				info.Variants = variantsRaw
+			} else {
+				info.Variants = []any{}
+			}
 			info.Status = "active"
 			data = append(data, info)
 		}
@@ -1105,7 +1123,7 @@ func (s *Server) handleV2PermissionSavedList(w http.ResponseWriter, r *http.Requ
 
 // handleV2PermissionSavedDelete serves DELETE /api/permission/saved/{id}.
 func (s *Server) handleV2PermissionSavedDelete(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": true})
+    writeError(w, http.StatusNotImplemented, "not implemented: permission saved delete")
 }
 
 func (s *Server) handleV2SessionPermissionRequestList(w http.ResponseWriter, r *http.Request) {
@@ -1155,16 +1173,31 @@ func (s *Server) handleV2SessionQuestionReject(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"data": true})
 }
 
-// handleV2SessionContext serves GET /api/session/{sessionID}/context.
+// handleV2SessionContext serves GET /api/session/{sessionID}/context. Upstream
+// returns the messages currently in the model's context window — i.e. those
+// after the last active compaction boundary (all messages when uncompacted).
+// (DCP block/stat detail lives at /api/session/{sessionID}/dcp/context.)
 func (s *Server) handleV2SessionContext(w http.ResponseWriter, r *http.Request) {
     sessionID := r.PathValue("sessionID")
-    if _, ok := s.store.GetSession(sessionID); !ok {
+    msgs, ok := s.store.Messages(sessionID)
+    if !ok {
         writeError(w, http.StatusNotFound, "session not found")
         return
     }
-    blocks := s.store.CompressionBlocks(sessionID)
-    stats := s.store.DCPStats(sessionID)
-    writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"blocks": blocks, "stats": stats}})
+    start := 0
+    for _, b := range s.store.CompressionBlocks(sessionID) {
+        if b.Active && b.EndIndex+1 > start {
+            start = b.EndIndex + 1
+        }
+    }
+    if start > len(msgs) {
+        start = len(msgs)
+    }
+    data := make([]any, 0, len(msgs)-start)
+    for i := start; i < len(msgs); i++ {
+        data = append(data, s.mapToV2Message(msgs[i]))
+    }
+    writeJSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
 // handleV2SessionCompact serves POST /api/session/{sessionID}/compact.
@@ -1181,9 +1214,8 @@ func (s *Server) handleV2SessionCompact(w http.ResponseWriter, r *http.Request) 
         writeError(w, http.StatusInternalServerError, err.Error())
         return
     }
-    // Publish DCP events
-    s.bus.Publish(event.NewSessionCompact(sessionID, block, stats))
-    s.bus.Publish(event.NewSessionCompacted(sessionID))
+    // compactSession already publishes the compaction lifecycle + legacy
+    // session.compact/compacted events; do not re-publish here (was a double-emit).
     writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"block": block, "stats": stats}})
 }
 

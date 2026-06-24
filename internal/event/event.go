@@ -1,6 +1,7 @@
 package event
 
 import (
+	"encoding/json"
 	"sync/atomic"
 	"time"
 )
@@ -20,20 +21,26 @@ type Event struct {
 	finalAssistant bool
 }
 
+func MarshalEvent(ev Event) ([]byte, error) {
+	return json.Marshal(ev)
+}
+
 // Event type discriminators (architecture §7.1).
 const (
 	TypeServerConnected    = "server.connected"
 	TypeMessageUpdated     = "message.updated"
 	TypeMessagePartDelta   = "message.part.delta"
 	TypeMessagePartUpdated = "message.part.updated"
+	TypeMessageRemoved     = "message.removed"
+	TypePartRemoved        = "part.removed"
 	TypeSessionIdle        = "session.idle"
 	TypeSessionError       = "session.error"
 	TypeSessionStatus      = "session.status"
 	TypeSessionCreated     = "session.created"
 	TypeSessionUpdated     = "session.updated"
 	TypeSessionDeleted     = "session.deleted"
-	TypeSessionCompact      = "session.compact"
-	TypeSessionCompacted    = "session.compacted"
+	TypeSessionCompact     = "session.compact"
+	TypeSessionCompacted   = "session.compacted"
 	TypePermissionAsked    = "permission.asked"
 	TypePermissionUpdated  = "permission.updated"
 	TypePermissionReplied  = "permission.replied"
@@ -60,10 +67,60 @@ const (
 	TypeSessionNextReasoningDelta   = "session.next.reasoning.delta"
 	TypeSessionNextReasoningEnded   = "session.next.reasoning.ended"
 
-// Compaction event types
-    TypeCompactionStarted = "compaction.started"
-    TypeCompactionEnded   = "compaction.ended"
+	// Compaction event types.
+	//
+	// session.next.compaction.* are the canonical upstream (1.17.x) names the
+	// TUI listens for; they carry messageID + reason. The bare compaction.* and
+	// session.compact/compacted variants are legacy Go-port names retained only
+	// for older clients.
+	TypeSessionNextCompactionStarted = "session.next.compaction.started"
+	TypeSessionNextCompactionDelta   = "session.next.compaction.delta"
+	TypeSessionNextCompactionEnded   = "session.next.compaction.ended"
+
+	TypeCompactionStarted = "compaction.started"
+	TypeCompactionEnded   = "compaction.ended"
 )
+
+// SessionNextCompactionStartedProps matches upstream session.next.compaction.started.
+type SessionNextCompactionStartedProps struct {
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	Reason    string `json:"reason"` // "auto" | "manual"
+}
+
+// SessionNextCompactionDeltaProps matches upstream session.next.compaction.delta (ephemeral).
+type SessionNextCompactionDeltaProps struct {
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	Text      string `json:"text"`
+}
+
+// SessionNextCompactionEndedProps matches upstream session.next.compaction.ended.
+type SessionNextCompactionEndedProps struct {
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	Reason    string `json:"reason"` // "auto" | "manual"
+	Text      string `json:"text"`   // full summary
+	Recent    string `json:"recent"` // recent context kept verbatim
+}
+
+// NewSessionNextCompactionStarted creates a session.next.compaction.started event.
+func NewSessionNextCompactionStarted(sessionID, messageID, reason string) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionNextCompactionStarted, Properties: SessionNextCompactionStartedProps{Timestamp: time.Now().UnixMilli(), SessionID: sessionID, MessageID: messageID, Reason: reason}}
+}
+
+// NewSessionNextCompactionDelta creates a session.next.compaction.delta event.
+func NewSessionNextCompactionDelta(sessionID, messageID, text string) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionNextCompactionDelta, Properties: SessionNextCompactionDeltaProps{Timestamp: time.Now().UnixMilli(), SessionID: sessionID, MessageID: messageID, Text: text}}
+}
+
+// NewSessionNextCompactionEnded creates a session.next.compaction.ended event.
+func NewSessionNextCompactionEnded(sessionID, messageID, reason, text, recent string) Event {
+	return Event{ID: newID("evt"), Type: TypeSessionNextCompactionEnded, Properties: SessionNextCompactionEndedProps{Timestamp: time.Now().UnixMilli(), SessionID: sessionID, MessageID: messageID, Reason: reason, Text: text, Recent: recent}}
+}
 
 // Todo event types
 const (
@@ -96,8 +153,6 @@ type PartDeltaProps struct {
 	Field     string `json:"field"`
 	Delta     string `json:"delta"`
 }
-
-
 
 type SessionNextReasoningStartedProps struct {
 	Timestamp          int64  `json:"timestamp"`
@@ -273,20 +328,20 @@ func NewSessionCompacted(sessionID string) Event {
 
 // CompactionStartedProps carries session ID for compaction start.
 type CompactionStartedProps struct {
-    SessionID string `json:"sessionID"`
+	SessionID string `json:"sessionID"`
 }
 
 func NewCompactionStarted(sessionID string) Event {
-    return Event{ID: newID("evt"), Type: TypeCompactionStarted, Properties: CompactionStartedProps{SessionID: sessionID}}
+	return Event{ID: newID("evt"), Type: TypeCompactionStarted, Properties: CompactionStartedProps{SessionID: sessionID}}
 }
 
 // CompactionEndedProps carries session ID for compaction end.
 type CompactionEndedProps struct {
-    SessionID string `json:"sessionID"`
+	SessionID string `json:"sessionID"`
 }
 
 func NewCompactionEnded(sessionID string) Event {
-    return Event{ID: newID("evt"), Type: TypeCompactionEnded, Properties: CompactionEndedProps{SessionID: sessionID}}
+	return Event{ID: newID("evt"), Type: TypeCompactionEnded, Properties: CompactionEndedProps{SessionID: sessionID}}
 }
 
 // NewMessagePartDelta creates a message.part.delta event (DROPPABLE).
@@ -301,9 +356,19 @@ func NewMessagePartUpdated(sessionID string, part any, t int64) Event {
 		Properties: PartUpdatedProps{SessionID: sessionID, Part: part, Time: t}}
 }
 
+// NewMessageRemoved creates a message.removed event.
+func NewMessageRemoved(sessionID, messageID string) Event {
+	return Event{ID: newID("evt"), Type: TypeMessageRemoved,
+		Properties: map[string]any{"sessionID": sessionID, "messageID": messageID}}
+}
+
+// NewPartRemoved creates a part.removed event.
+func NewPartRemoved(sessionID, messageID, partID string) Event {
+	return Event{ID: newID("evt"), Type: TypePartRemoved,
+		Properties: map[string]any{"sessionID": sessionID, "messageID": messageID, "partID": partID}}
+}
+
 // NewMessageUpdated creates a message.updated event carrying the Message info.
-// finalAssistant marks whether this is the completed assistant message (drives
-// guaranteed-delivery classification, §2.3).
 func NewMessageUpdated(sessionID string, info any, finalAssistant bool) Event {
 	return Event{ID: newID("evt"), Type: TypeMessageUpdated,
 		Properties:     MessageUpdatedProps{SessionID: sessionID, Info: info},
@@ -424,7 +489,6 @@ type SessionNextTextEndedProps struct {
 	TextID             string `json:"textID"`
 	Text               string `json:"text"`
 }
-
 
 type SessionNextToolInputStartedProps struct {
 	Timestamp          int64  `json:"timestamp"`
@@ -801,10 +865,10 @@ func NewSessionNextRetried(sessionID string, attempt int, errMsg string, isRetry
 const TypeCommandExecuted = "command.executed"
 
 type CommandExecutedProps struct {
-    Name      string `json:"name"`
-    SessionID string `json:"sessionID"`
-    Arguments string `json:"arguments"`
-    MessageID string `json:"messageID"`
+	Name      string `json:"name"`
+	SessionID string `json:"sessionID"`
+	Arguments string `json:"arguments"`
+	MessageID string `json:"messageID"`
 }
 
 func NewCommandExecuted(name, sessionID, arguments, messageID string) Event {
@@ -818,11 +882,11 @@ const TypeSessionNextShellStarted = "session.next.shell.started"
 const TypeSessionNextShellEnded = "session.next.shell.ended"
 
 type ShellStartedProps struct {
-    Timestamp int64  `json:"timestamp"`
-    SessionID string `json:"sessionID"`
-    MessageID string `json:"messageID"`
-    CallID    string `json:"callID"`
-    Command   string `json:"command"`
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	CallID    string `json:"callID"`
+	Command   string `json:"command"`
 }
 
 func NewSessionNextShellStarted(sessionID, messageID, callID, command string) Event {
@@ -836,10 +900,10 @@ func NewSessionNextShellStarted(sessionID, messageID, callID, command string) Ev
 }
 
 type ShellEndedProps struct {
-    Timestamp int64  `json:"timestamp"`
-    SessionID string `json:"sessionID"`
-    CallID    string `json:"callID"`
-    Output    string `json:"output"`
+	Timestamp int64  `json:"timestamp"`
+	SessionID string `json:"sessionID"`
+	CallID    string `json:"callID"`
+	Output    string `json:"output"`
 }
 
 func NewSessionNextShellEnded(sessionID, callID, output string) Event {
@@ -855,8 +919,8 @@ func NewSessionNextShellEnded(sessionID, callID, output string) Event {
 const TypeSessionDiff = "session.diff"
 
 type SessionDiffProps struct {
-    SessionID string `json:"sessionID"`
-    Diff      any    `json:"diff"`
+	SessionID string `json:"sessionID"`
+	Diff      any    `json:"diff"`
 }
 
 func NewSessionDiff(sessionID string, diff any) Event {

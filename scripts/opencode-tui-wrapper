@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Wrapper: route the default `opencode` TUI to the opencode-go backend server
+# (systemd unit `opencode.service`, http://127.0.0.1:4096) via `attach`, while
+# passing every other subcommand straight through to the real TS binary.
+#
+# Disable by unsetting/exporting OPENCODE_GO_TUI=0, or call the real binary
+# directly at $REAL.
+set -euo pipefail
+
+# Helper: ensure executable exists
+validate_exec() {
+  local p="$1"
+  if [[ -z "$p" || ! -x "$p" ]]; then
+    echo "Error: required executable not found or not executable: $p" >&2
+    exit 1
+  fi
+}
+
+# Resolve REAL binary, guard recursion
+REAL="${OPENCODE_REAL_BIN:-$HOME/.opencode/bin/opencode}"
+validate_exec "$REAL"
+if [[ "$(realpath "$REAL")" == "$(realpath "$0")" ]]; then
+  echo "Error: OPENCODE_REAL_BIN resolves to wrapper itself, recursion prevented." >&2
+  exit 1
+fi
+
+SERVER_URL="${OPENCODE_GO_URL:-http://127.0.0.1:4096}"
+
+# Resolve Go binary
+GO_BIN="${OPENCODE_GO_BIN:-$HOME/opencode-go/bin/opencode-go}"
+if ! command -v "$GO_BIN" >/dev/null 2>&1; then
+  GO_BIN=$(command -v opencode-go || true)
+fi
+validate_exec "$GO_BIN"
+
+# Opt-out escape hatch.
+if [[ "${OPENCODE_GO_TUI:-1}" != "1" || "${OPENCODE_FORCE_TS:-0}" == "1" ]]; then
+  exec "$REAL" "$@"
+fi
+
+# First non-flag arg is the subcommand (if any). The default (no subcommand, or
+# a bare project path) starts the TUI — that's the case we redirect to attach.
+sub=""
+for a in "$@"; do
+  case "$a" in
+    -*) continue ;;   # skip global flags like --print-logs
+    *)  sub="$a"; break ;;
+  esac
+done
+
+# waitHealthy blocks briefly until the opencode-go backend answers, so a cold
+# start doesn't drop straight to a connection error.
+waitHealthy() {
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS -m 2 "$SERVER_URL/api/global/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+startBackend() {
+  waitHealthy && return 0
+
+  # Prefer the system service used on SSH sessions. Ignore failures so the
+  # wrapper still works without systemd privileges.
+  systemctl start opencode.service >/dev/null 2>&1 || true
+  waitHealthy && return 0
+
+  # User units often fail in fresh non-login SSH shells without a user bus, but
+  # try them before falling back.
+  systemctl --user start opencode.service >/dev/null 2>&1 || true
+  waitHealthy && return 0
+
+  # Last resort: spawn opencode-go directly for this user.
+if [[ -x "$GO_BIN" ]]; then
+  nohup "$GO_BIN" serve --hostname 127.0.0.1 --port 4096 \
+    >"${XDG_RUNTIME_DIR:-/tmp}/opencode-go.log" 2>&1 &
+fi
+
+  waitHealthy
+}
+
+case "$sub" in
+  # Non-interactive agent run → call opencode-go's blocking message API
+  # directly. TS `run --attach` exits cleanly but currently drops text output
+  # from the attached event stream, so this wrapper owns the formatter.
+  run)
+    if [[ " $* " == *" --attach "* ]]; then
+      exec "$REAL" "$@"
+    fi
+    startBackend || true
+
+    format="text"
+    prompt_parts=()
+    next_is_format=0
+    for a in "${@:2}"; do
+      if [[ "$next_is_format" == "1" ]]; then
+        format="$a"
+        next_is_format=0
+        continue
+      fi
+      case "$a" in
+        --format)
+          next_is_format=1
+          ;;
+        --format=*)
+          format="${a#--format=}"
+          ;;
+        --*)
+          # Unknown run flag: use the TS CLI only as an attach client; never
+          # start/use the TS server for `opencode run`.
+          startBackend || { echo "opencode-go backend unavailable at $SERVER_URL" >&2; exit 1; }
+          exec "$REAL" run --attach "$SERVER_URL" "${@:2}"
+          ;;
+        *) prompt_parts+=("$a") ;;
+      esac
+    done
+
+    prompt="${prompt_parts[*]}"
+    if [[ -z "$prompt" ]]; then
+      startBackend || { echo "opencode-go backend unavailable at $SERVER_URL" >&2; exit 1; }
+      exec "$REAL" run --attach "$SERVER_URL" "${@:2}"
+    fi
+
+    python3 - "$SERVER_URL" "$format" "$prompt" <<'PY'
+import json, sys, urllib.request
+
+server, fmt, prompt = sys.argv[1:4]
+def post(path, body):
+    req = urllib.request.Request(server + path, data=json.dumps(body).encode(), headers={"Content-Type":"application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.loads(r.read().decode())
+
+sid = None
+try:
+    sid = post('/session', {}).get('id')
+    resp = post(f'/session/{sid}/message', {
+        'model': {'providerID': 'concactao', 'modelID': 'gpt-oss-120b-combo'},
+        'parts': [{'type': 'text', 'text': prompt}],
+    })
+
+    for part in resp.get('parts', []):
+        if fmt == 'json':
+            t = part.get('type')
+            if t == 'text':
+                print(json.dumps({'type': 'text', 'text': part.get('text', '')}, ensure_ascii=False), flush=True)
+            elif t == 'step-start':
+                print(json.dumps({'type': 'step_start', 'part': part}, ensure_ascii=False), flush=True)
+            elif t == 'step-finish':
+                print(json.dumps({'type': 'step_finish', 'part': part}, ensure_ascii=False), flush=True)
+        elif part.get('type') == 'text':
+            print(part.get('text', ''), end='')
+    if fmt != 'json':
+        print()
+except KeyboardInterrupt:
+    if sid:
+        try:
+            post(f'/session/{sid}/abort', {})
+        except Exception:
+            pass
+    sys.exit(1)
+PY
+    exit $?
+    ;;
+  # Native opencode-go utilities.
+  models)
+    exec "$GO_BIN" models
+    ;;
+  # Pure utilities / local-state commands: passthrough to the TS binary. They
+  # read the same ~/.local/share/opencode data, so results stay consistent.
+  completion|acp|mcp|attach|debug|providers|auth|agent|upgrade|uninstall|\
+  serve|web|stats|export|import|github|pr|session|plugin|plug|db)
+    exec "$REAL" "$@"
+    ;;
+esac
+
+# Default (no subcommand / bare project path) → attach the TUI to opencode-go.
+startBackend || { echo "opencode-go backend unavailable at $SERVER_URL" >&2; exit 1; }
+exec "$REAL" attach "$SERVER_URL" "$@"

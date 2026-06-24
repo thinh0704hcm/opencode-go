@@ -1,3 +1,4 @@
+// Blocked: depends on gated normalize.go provider/model normalizer.
 //go:build opencode_wip
 
 package server

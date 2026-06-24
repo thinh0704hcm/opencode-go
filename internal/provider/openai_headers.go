@@ -15,7 +15,7 @@ type OpenAIWithHeaders struct {
 // NewOpenAIWithHeaders builds an OpenAI provider with optional Helicone headers.
 // It mirrors the legacy behavior used in tests: sets Helicone-Auth header when an API key is provided,
 // sets Helicone-Target-URL to the original base, and overrides baseURL with HELICONE_BASE_URL if valid.
-func NewOpenAIWithHeaders(id, baseURL, apiKey, model string, client *http.Client, _ map[string]string) *OpenAIWithHeaders {
+func NewOpenAIWithHeaders(id, baseURL, apiKey, model string, client *http.Client, cfgHeaders map[string]string) *OpenAIWithHeaders {
     // base provider (ignores headers)
     o := NewOpenAI(id, baseURL, apiKey, model, client)
     // Init wrapper
@@ -25,10 +25,16 @@ func NewOpenAIWithHeaders(id, baseURL, apiKey, model string, client *http.Client
         wrapper.headers["Helicone-Auth"] = "Bearer " + apiKey
     }
     // Set target URL header to original base URL
-    wrapper.headers["Helicone-Target-URL"] = o.baseURL
-    // Override base URL with env var if valid (starts with https://)
-    if env := os.Getenv("HELICONE_BASE_URL"); env != "" && strings.HasPrefix(env, "https://") {
-        wrapper.OpenAI.baseURL = strings.TrimRight(env, "/")
+	// Override base URL with env var if valid (starts with https://)
+	if env := os.Getenv("HELICONE_BASE_URL"); env != "" && strings.HasPrefix(env, "https://") {
+		wrapper.headers["Helicone-Target-URL"] = o.baseURL
+		wrapper.OpenAI.baseURL = strings.TrimRight(env, "/")
+	}
+
+        // Merge config-provided headers (override Helicone defaults)
+    for k, v := range cfgHeaders {
+        wrapper.headers[k] = v
     }
+    o.extraHeaders = wrapper.headers
     return wrapper
 }

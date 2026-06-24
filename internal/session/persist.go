@@ -12,6 +12,8 @@ import (
 type persistedSession struct {
 	Session  Session            `json:"session"`
 	Messages []MessageWithParts `json:"messages"`
+	NextSeq  uint64             `json:"nextSeq,omitempty"`
+	Todos    []Todo             `json:"todos,omitempty"`
 }
 
 func (s *Store) sessionsDir() string {
@@ -48,6 +50,7 @@ func (s *Store) Load() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var maxSeq uint64
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -84,6 +87,26 @@ func (s *Store) Load() error {
 			}
 		}
 		s.messages[sess.ID] = msgs
+		if len(ps.Todos) > 0 {
+			s.todos[sess.ID] = make([]Todo, len(ps.Todos))
+			copy(s.todos[sess.ID], ps.Todos)
+		}
+		if ps.NextSeq > maxSeq {
+			maxSeq = ps.NextSeq
+		}
+		for _, m := range ps.Messages {
+			if m.Info.GlobalSeq > maxSeq {
+				maxSeq = m.Info.GlobalSeq
+			}
+			for _, p := range m.Parts {
+				if p.GlobalSeq > maxSeq {
+					maxSeq = p.GlobalSeq
+				}
+			}
+		}
+	}
+	if maxSeq > s.nextSeq {
+		s.nextSeq = maxSeq
 	}
 	return nil
 }
@@ -105,9 +128,13 @@ func (s *Store) PersistSession(sessionID string) {
 		s.mu.RUnlock()
 		return
 	}
-	ps := persistedSession{Session: *sess}
+	ps := persistedSession{Session: *sess, NextSeq: s.nextSeq}
 	for _, m := range s.messages[sessionID] {
 		ps.Messages = append(ps.Messages, copyMessage(m))
+	}
+	if todos, ok := s.todos[sessionID]; ok && len(todos) > 0 {
+		ps.Todos = make([]Todo, len(todos))
+		copy(ps.Todos, todos)
 	}
 	data, err := json.Marshal(ps)
 	s.mu.RUnlock()

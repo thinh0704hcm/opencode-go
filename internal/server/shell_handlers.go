@@ -39,7 +39,7 @@ func (s *Server) handleSessionShell(w http.ResponseWriter, r *http.Request) {
         return
     }
     if s.sessionBusy(id) {
-        writeJSON(w, http.StatusConflict, map[string]any{"_tag":"ConflictError","message":"session is busy","resource":"session"})
+        writeSessionBusy(w, id)
         return
     }
 

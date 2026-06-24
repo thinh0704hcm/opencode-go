@@ -2,13 +2,13 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/opencode-go/opencode-go/internal/config"
 	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/session"
 )
@@ -42,51 +42,51 @@ type sessionCreateRequest struct {
 
 // handleSessionCreate serves POST /session, accepting an empty or partial body.
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-    // Read raw request body (limit 1 MiB).
-    r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-    data, err := io.ReadAll(r.Body)
-    if err != nil {
-        writeError(w, http.StatusBadRequest, "failed to read request body")
-        return
-    }
+	// Read raw request body (limit 1 MiB).
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
 
-    var req sessionCreateRequest
-    if len(data) == 0 {
-        // empty body accepted
-    } else {
-        if !requireJSON(w, r) {
-            return
-        }
-        var raw map[string]any
-        if err := json.Unmarshal(data, &raw); err != nil {
-            writeError(w, http.StatusBadRequest, "invalid JSON")
-            return
-        }
-        if v, ok := raw["title"]; ok {
-            if s, ok2 := v.(string); !ok2 || strings.TrimSpace(s) == "" {
-                writeError(w, http.StatusBadRequest, "invalid title")
-                return
-            } else {
-                req.Title = s
-            }
-        }
-        if v, ok := raw["parentID"]; ok {
-            if s, ok2 := v.(string); ok2 {
-                req.ParentID = s
-            } else {
-                writeError(w, http.StatusBadRequest, "invalid parentID")
-                return
-            }
-        }
-    }
+	var req sessionCreateRequest
+	if len(data) == 0 {
+		// empty body accepted
+	} else {
+		if !requireJSON(w, r) {
+			return
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		if v, ok := raw["title"]; ok {
+			if s, ok2 := v.(string); !ok2 || strings.TrimSpace(s) == "" {
+				writeError(w, http.StatusBadRequest, "invalid title")
+				return
+			} else {
+				req.Title = s
+			}
+		}
+		if v, ok := raw["parentID"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				req.ParentID = s
+			} else {
+				writeError(w, http.StatusBadRequest, "invalid parentID")
+				return
+			}
+		}
+	}
 
-    s.bus.ClearReplay()
+	s.bus.ClearReplay()
 
-    dir := directoryParam(r)
-    sess := s.store.CreateSession(req.ParentID, req.Title, dir)
-    s.store.PersistSession(sess.ID)
-    s.bus.Publish(event.NewSessionCreated(sess.ID, sess))
-    writeJSON(w, http.StatusOK, sess)
+	dir := directoryParam(r)
+	sess := s.store.CreateSession(req.ParentID, req.Title, dir)
+	s.store.PersistSession(sess.ID)
+	s.bus.Publish(event.NewSessionCreated(sess.ID, sess))
+	writeJSON(w, http.StatusOK, sess)
 }
 
 // promptPart is one part of a prompt body.
@@ -101,6 +101,7 @@ type promptPart struct {
 type promptModel struct {
 	ProviderID string `json:"providerID"`
 	ModelID    string `json:"modelID"`
+	Variant    string `json:"variant,omitempty"`
 }
 
 // promptAsyncRequest is the POST /session/{id}/prompt_async body.
@@ -150,6 +151,43 @@ func (r promptAsyncRequest) AgentName() string {
 		return m
 	}
 	return ""
+}
+
+func normalizeRuntimeModel(providerID, modelID string) (string, string) {
+	if providerID == "concactao" && strings.HasPrefix(modelID, "openai/") {
+		return providerID, "cx/" + strings.TrimPrefix(modelID, "openai/")
+	}
+	return providerID, modelID
+}
+
+func (s *Server) requestGenerationOptions(providerID, modelID, variant string) generationOptions {
+	variant = strings.TrimSpace(variant)
+	if variant == "" {
+		return generationOptions{}
+	}
+	providers, _ := config.Load(s.workdir).Raw["provider"].(map[string]any)
+	p, _ := providers[providerID].(map[string]any)
+	models, _ := p["models"].(map[string]any)
+	m, _ := models[modelID].(map[string]any)
+	variants, _ := m["variants"].(map[string]any)
+	v, _ := variants[variant].(map[string]any)
+	if len(v) == 0 {
+		return generationOptions{}
+	}
+	opts := generationOptions{}
+	for k, val := range v {
+		if k == "reasoningEffort" {
+			if s, ok := val.(string); ok {
+				opts.reasoningEffort = s
+			}
+			continue
+		}
+		if opts.extraBody == nil {
+			opts.extraBody = map[string]any{}
+		}
+		opts.extraBody[k] = val
+	}
+	return opts
 }
 
 // handlePromptAsync serves POST /session/{id}/prompt_async. Returns 204
@@ -209,6 +247,8 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	if reqModelID == "" {
 		reqModelID = modelID
 	}
+	reqProviderID, reqModelID = normalizeRuntimeModel(reqProviderID, reqModelID)
+	opts := s.requestGenerationOptions(reqProviderID, reqModelID, req.Model.Variant)
 
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
@@ -222,10 +262,10 @@ func (s *Server) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishUserMessage(id, userMsg)
 
-	_, ok = s.startOrQueue(id, userMsg.Info.ID, "", reqProviderID, reqModelID, texts, images, req.System, agent, "")
+	_, ok = s.startOrQueue(id, userMsg.Info.ID, "", reqProviderID, reqModelID, texts, images, req.System, agent, "", nil, opts)
 	if !ok {
 		s.store.RemoveMessage(id, userMsg.Info.ID)
-		writeJSON(w, http.StatusConflict, map[string]any{"_tag": "ConflictError", "message": "session is busy", "resource": "session"})
+		writeSessionBusy(w, id)
 		return
 	}
 	s.bus.Publish(event.NewSessionNextPrompted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
@@ -293,6 +333,8 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if reqModelID == "" {
 		reqModelID = modelID
 	}
+	reqProviderID, reqModelID = normalizeRuntimeModel(reqProviderID, reqModelID)
+	opts := s.requestGenerationOptions(reqProviderID, reqModelID, req.Model.Variant)
 
 	// Append the user message and publish message.updated(user) synchronously
 	// so it is ordered before the assistant turn.
@@ -308,17 +350,28 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	s.bus.Publish(event.NewSessionNextPrompted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
 	s.bus.Publish(event.NewSessionNextPromptAdmitted(id, userMsg.Info.ID, strings.Join(texts, "\n"), "queue"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s.registerCancel(id, cancel)
-	defer func() { s.clearCancel(id); cancel() }()
-
-	asst, ok := s.runGenerationSyncCtx(ctx, id, userMsg.Info.ID, "", reqProviderID, modelID, texts, images, req.System, agent)
+	done := make(chan struct{})
+	_, ok = s.startOrQueue(id, userMsg.Info.ID, "", reqProviderID, reqModelID, texts, images, req.System, agent, "", done, opts)
 	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
+		s.store.RemoveMessage(id, userMsg.Info.ID)
+		writeSessionBusy(w, id)
 		return
 	}
-	s.bus.Publish(event.NewSessionStatus(id, map[string]string{"type": "idle"}))
-	s.bus.Publish(event.NewSessionIdle(id))
+
+	select {
+	case <-done:
+		// generation completed
+	case <-r.Context().Done():
+		writeError(w, http.StatusRequestTimeout, "client cancelled")
+		return
+	}
+
+	msgs, _ := s.store.Messages(id)
+	var asst *session.MessageWithParts
+	if len(msgs) > 0 {
+		last := msgs[len(msgs)-1]
+		asst = &last
+	}
 	writeJSON(w, http.StatusOK, asst)
 }
 
@@ -342,66 +395,66 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 
 // hasJSONContentType checks if the request has a JSON content type.
 func hasJSONContentType(r *http.Request) bool {
-    ct := r.Header.Get("Content-Type")
-    return strings.HasPrefix(ct, "application/json")
+	ct := r.Header.Get("Content-Type")
+	return strings.HasPrefix(ct, "application/json")
 }
 
 // requireJSON writes a 400 error if the request doesn't have a JSON content type.
 // Returns true if the request is valid (JSON), false if it was rejected.
 func requireJSON(w http.ResponseWriter, r *http.Request) bool {
-    if !hasJSONContentType(r) {
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "expected application/json content type"})
-        return false
-    }
-    return true
+	if !hasJSONContentType(r) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "expected application/json content type"})
+		return false
+	}
+	return true
 }
 
 // decodeStrictBody decodes a JSON request body and rejects trailing data.
 // If allowEmpty is true, an empty body is accepted (no decode attempted).
 // Returns true if decoding succeeded, false if an error was written.
 func decodeStrictBody(w http.ResponseWriter, r *http.Request, v any, allowEmpty bool) bool {
-    // Check for empty body
-    if r.Body == nil {
-        if allowEmpty {
-            return true
-        }
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body is empty"})
-        return false
-    }
+	// Check for empty body
+	if r.Body == nil {
+		if allowEmpty {
+			return true
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body is empty"})
+		return false
+	}
 
-    // Peek at first byte to detect empty body
-    buf, err := io.ReadAll(io.LimitReader(r.Body, 1))
-    if err != nil {
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read request body"})
-        return false
-    }
+	// Peek at first byte to detect empty body
+	buf, err := io.ReadAll(io.LimitReader(r.Body, 1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read request body"})
+		return false
+	}
 
-    if len(buf) == 0 {
-        if allowEmpty {
-            return true
-        }
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body is empty"})
-        return false
-    }
+	if len(buf) == 0 {
+		if allowEmpty {
+			return true
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body is empty"})
+		return false
+	}
 
-    // Reconstruct the reader with the peeked byte
-    body := io.MultiReader(bytes.NewReader(buf), r.Body)
+	// Reconstruct the reader with the peeked byte
+	body := io.MultiReader(bytes.NewReader(buf), r.Body)
 
-    // Decode JSON
-    dec := json.NewDecoder(body)
-    if err := dec.Decode(v); err != nil {
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
-        return false
-    }
+	// Decode JSON
+	dec := json.NewDecoder(body)
+	if err := dec.Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON: " + err.Error()})
+		return false
+	}
 
-    // Reject trailing data
-    var trailing json.RawMessage
-    if err := dec.Decode(&trailing); err != io.EOF {
-        writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unexpected trailing data in request body"})
-        return false
-    }
+	// Reject trailing data
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unexpected trailing data in request body"})
+		return false
+	}
 
-    return true
+	return true
 }
 
 // decodeBody decodes the JSON request body into v. An empty body is treated as

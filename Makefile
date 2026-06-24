@@ -13,7 +13,11 @@ PORT ?= 4182
 HOST ?= 127.0.0.1
 BIN  ?= bin/opencode-go
 
-.PHONY: help build build-sdk build-wrapper sdk-smoke run run-real test test-race vet fmt fmt-check check tidy clean tui kill
+# Install location for `make deploy`. Defaults to the user-local bin that holds
+# the installed wrapper. Override with `make deploy PREFIX=/somewhere/bin`.
+PREFIX ?= $(HOME)/.local/bin
+
+.PHONY: help build build-sdk build-wrapper sdk-smoke run run-real test test-race vet fmt fmt-check check tidy clean tui kill deploy
 
 help: ## Print available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -36,6 +40,29 @@ run: build ## Build + serve with mock provider (foreground)
 
 run-real: build ## Build + serve with real provider (env-configured)
 	$(BIN) serve --hostname $(HOST) --port $(PORT)
+
+# Canonical TUI wrapper installed by `make deploy`. Routes the default `opencode`
+# TUI to the opencode-go backend via `attach` and auto-starts the backend; passes
+# other subcommands through to the real TS binary ($HOME/.opencode/bin/opencode).
+# (scripts/opencode-wrapper is the separate SDK serve/models switch used by
+# build-sdk/sdk-smoke — do NOT deploy that one.)
+WRAPPER ?= scripts/opencode-tui-wrapper
+
+deploy: build ## Install fresh opencode-go + TUI wrapper into $(PREFIX) (default ~/.local/bin)
+	@mkdir -p "$(PREFIX)"
+	install -m 0755 $(BIN) "$(PREFIX)/opencode-go"
+	@echo "installed binary  -> $(PREFIX)/opencode-go"
+	@# Back up an existing 'opencode' only when it differs from the wrapper we are
+	@# installing; never overwrite anything silently, never invent an opencode-ts.
+	@if [ -e "$(PREFIX)/opencode" ] && ! cmp -s "$(WRAPPER)" "$(PREFIX)/opencode"; then \
+		bak="$(PREFIX)/opencode.bak-$$(date +%Y%m%d-%H%M%S)"; \
+		cp -p "$(PREFIX)/opencode" "$$bak"; \
+		echo "backed up differing opencode -> $$bak"; \
+	fi
+	install -m 0755 $(WRAPPER) "$(PREFIX)/opencode"
+	@echo "installed wrapper -> $(PREFIX)/opencode"
+	@[ -x "$(HOME)/.opencode/bin/opencode" ] || echo "NOTE: real TS binary $(HOME)/.opencode/bin/opencode not found — set OPENCODE_REAL_BIN"
+	@echo "Done. Default 'opencode' attaches the TUI to the opencode-go backend ($(HOME)/opencode-go/bin/opencode-go)."
 
 test: ## Run all tests
 	go test ./...

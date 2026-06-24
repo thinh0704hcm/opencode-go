@@ -22,6 +22,7 @@ type OpenAI struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+    extraHeaders map[string]string
 }
 
 // NewOpenAI builds an OpenAI-compatible provider.
@@ -38,15 +39,28 @@ func NewOpenAI(id, baseURL, apiKey, model string, client *http.Client) *OpenAI {
 	}
 }
 
+// SetExtraHeaders assigns custom headers for the provider.
+func (o *OpenAI) SetExtraHeaders(h map[string]string) {
+    o.extraHeaders = h
+}
+
 // ID returns the provider id.
 func (o *OpenAI) ID() string { return o.id }
 
+// BaseURL returns the configured base URL (e.g. http://host:port/v1). Used to
+// source the 9Router web search/fetch endpoints, which share this gateway.
+func (o *OpenAI) BaseURL() string { return o.baseURL }
+
+// APIKey returns the configured API key (shared with the 9Router gateway).
+func (o *OpenAI) APIKey() string { return o.apiKey }
+
 type chatCompletionsRequest struct {
-	Model         string         `json:"model"`
-	Messages      []ChatMessage  `json:"messages"`
-	Stream        bool           `json:"stream"`
-	StreamOptions *streamOptions `json:"stream_options,omitempty"`
-	Tools         []chatTool     `json:"tools,omitempty"`
+	Model           string         `json:"model"`
+	Messages        []ChatMessage  `json:"messages"`
+	Stream          bool           `json:"stream"`
+	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
+	Tools           []chatTool     `json:"tools,omitempty"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	// MaxTokens is omitted when 0 so non-budgeted turns stay byte-identical and
 	// invalid (< 1) budgets never reach the upstream.
 	MaxTokens int `json:"max_tokens,omitempty"`
@@ -77,9 +91,15 @@ type sseChunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details,omitempty"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage"`
 	// Error is set by some proxies (e.g. 9Router) when a backend fails mid-stream.
 	// Without this field the error JSON would be silently dropped as an empty chunk.
@@ -146,9 +166,23 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 		}
 	}
 
-	body, err := json.Marshal(chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools, MaxTokens: maxTokens})
+	payload := chatCompletionsRequest{Model: model, Messages: msgs, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Tools: tools, ReasoningEffort: req.ReasoningEffort, MaxTokens: maxTokens}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
+	}
+	if len(req.ExtraBody) > 0 {
+		var merged map[string]any
+		if err := json.Unmarshal(body, &merged); err != nil {
+			return nil, err
+		}
+		for k, v := range req.ExtraBody {
+			merged[k] = v
+		}
+		body, err = json.Marshal(merged)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Retry transient provider failures (transport errors and retryable
@@ -166,6 +200,10 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 		httpReq.Header.Set("Accept", "text/event-stream")
 		if o.apiKey != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+		}
+		// Apply custom extra headers
+		for k, v := range o.extraHeaders {
+			httpReq.Header.Set(k, v)
 		}
 
 		r, err := o.client.Do(httpReq)
@@ -240,6 +278,7 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 			return true
 		}
 
+		sawDone := false
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data:") {
@@ -250,13 +289,21 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 				continue
 			}
 			if data == "[DONE]" {
+				sawDone = true
 				if len(toolOrder) > 0 {
 					if !emitToolCalls() {
 						return
 					}
 				}
+				// Emit final stop chunk per protocol
+				select {
+				case out <- ChatChunk{FinishReason: "stop"}:
+				case <-ctx.Done():
+					return
+				}
 				return
 			}
+
 			var chunk sseChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue // tolerate non-standard keepalive lines
@@ -277,10 +324,20 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 			var usage *Usage
 			if chunk.Usage != nil {
 				usage = &Usage{
-					Input:  chunk.Usage.PromptTokens,
-					Output: chunk.Usage.CompletionTokens,
-					Total:  chunk.Usage.TotalTokens,
+					Input:      chunk.Usage.PromptTokens,
+					Output:     chunk.Usage.CompletionTokens,
+					Total:      chunk.Usage.TotalTokens,
+					Reasoning:  0,
+					CacheRead:  0,
+					CacheWrite: 0,
 				}
+				if chunk.Usage.PromptTokensDetails != nil {
+					usage.CacheRead = chunk.Usage.PromptTokensDetails.CachedTokens
+				}
+				if chunk.Usage.CompletionTokensDetails != nil {
+					usage.Reasoning = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+				}
+
 			}
 
 			if len(chunk.Choices) == 0 {
@@ -316,6 +373,7 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 			cc := ChatChunk{TextDelta: ch.Delta.Content, ReasoningDelta: ch.Delta.ReasoningContent}
 			if ch.FinishReason != nil {
 				cc.FinishReason = *ch.FinishReason
+				sawDone = true
 			}
 
 			if cc.FinishReason == "tool_calls" && len(toolOrder) > 0 {
@@ -352,6 +410,14 @@ func (o *OpenAI) StreamChat(ctx context.Context, req ChatRequest) (<-chan ChatCh
 			case <-ctx.Done():
 			}
 		}
+		if !sawDone {
+			select {
+			case out <- ChatChunk{Err: fmt.Errorf("stream closed without [DONE]")}:
+			case <-ctx.Done():
+				return
+			}
+		}
+
 	}()
 
 	return out, nil

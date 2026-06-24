@@ -10,10 +10,20 @@ import (
 // returns an empty array. REDACTION: command/url/environment are never emitted.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.mcp == nil {
-		writeJSON(w, http.StatusOK, []any{})
+		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.mcp.Status())
+	statuses := s.mcp.Status()
+	result := map[string]any{}
+	for _, st := range statuses {
+		result[st.Name] = map[string]any{
+			"name":      st.Name,
+			"status":    st.Status,
+			"error":     st.Error,
+			"toolCount": st.ToolCount,
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // handleMCPConnect serves POST /mcp/{name}/connect. The real MCP client is not
@@ -45,7 +55,7 @@ func (s *Server) handleMCPDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.mcp.Disconnect(name)
-	s.tools.Unregister(name + ":") // Unregister all tools with this prefix
+	s.tools.Unregister(name + "_") // Unregister all tools with this prefix
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":   name,
 		"status": status.Status,
@@ -111,17 +121,26 @@ func (s *Server) handleMCPAuthRemove(w http.ResponseWriter, r *http.Request) {
 // handleMCPAuth serves POST /mcp/{name}/auth.
 func (s *Server) handleMCPAuth(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("name")
-	writeError(w, http.StatusNotImplemented, "MCP OAuth not implemented")
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"_tag":  "McpUnsupportedOAuthError",
+		"error": "OAuth not supported for remote MCP servers in this build",
+	})
 }
 
 // handleMCPAuthAuthenticate serves POST /mcp/{name}/auth/authenticate.
 func (s *Server) handleMCPAuthAuthenticate(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("name")
-	writeError(w, http.StatusNotImplemented, "MCP OAuth not implemented")
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"_tag":  "McpUnsupportedOAuthError",
+		"error": "OAuth not supported for remote MCP servers in this build",
+	})
 }
 
 // handleMCPAuthCallback serves POST /mcp/{name}/auth/callback.
 func (s *Server) handleMCPAuthCallback(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("name")
-	writeError(w, http.StatusNotImplemented, "MCP OAuth not implemented")
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"_tag":  "McpUnsupportedOAuthError",
+		"error": "OAuth not supported for remote MCP servers in this build",
+	})
 }

@@ -1,3 +1,4 @@
+// Blocked: depends on gated marketplace_handlers.go catalog handlers.
 //go:build opencode_wip
 
 package server
@@ -81,15 +82,15 @@ func TestMarketplacePluginsIncludeInstalledConfigPlugin(t *testing.T) {
 }
 
 func TestMarketplacePluginsDoNotIncludeLSPFormatter(t *testing.T) {
-    srv, _ := newMarketplaceTestServer(t)
-    ts := httptest.NewServer(srv.Handler())
-    defer ts.Close()
-    got := getMarketplaceList(t, ts.URL, "/marketplace/plugins")
-    for _, item := range got.Items {
-        if item.ID == "lsp" || item.ID == "formatter" {
-            t.Fatalf("unexpected built-in plugin %s present", item.ID)
-        }
-    }
+	srv, _ := newMarketplaceTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	got := getMarketplaceList(t, ts.URL, "/marketplace/plugins")
+	for _, item := range got.Items {
+		if item.ID == "lsp" || item.ID == "formatter" {
+			t.Fatalf("unexpected built-in plugin %s present", item.ID)
+		}
+	}
 }
 
 func TestThemeSelectInvalidID400(t *testing.T) {

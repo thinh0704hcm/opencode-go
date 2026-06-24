@@ -27,10 +27,13 @@ type RevertInfo struct {
     PartID    string `json:"partID,omitempty"`
 }
 
-// SessionTime holds session created/updated timestamps (ms).
+// SessionTime holds session created/updated timestamps (ms). Compacting is set
+// to a timestamp while a compaction is in progress and cleared when it finishes;
+// the TUI shows its "compacting" working indicator while this is non-nil.
 type SessionTime struct {
-	Created int64 `json:"created"`
-	Updated int64 `json:"updated"`
+	Created    int64  `json:"created"`
+	Updated    int64  `json:"updated"`
+	Compacting *int64 `json:"compacting,omitempty"`
 }
 
 // Tokens holds assistant token accounting (SDK AssistantMessage shape).

@@ -1,4 +1,4 @@
-//go:build opencode_wip
+
 
 package server
 

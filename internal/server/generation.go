@@ -9,6 +9,17 @@ import (
 	"github.com/opencode-go/opencode-go/internal/session"
 )
 
+type generationOptions struct {
+	reasoningEffort string
+	extraBody       map[string]any
+}
+
+type generationOptionsContextKey struct{}
+
+func (o generationOptions) empty() bool {
+	return o.reasoningEffort == "" && len(o.extraBody) == 0
+}
+
 // publishUserMessage publishes message.updated for the user message and a
 // message.part.updated for each of its parts (the TUI renders message text
 // from message.part.updated events, not from message.updated info). The info
@@ -29,6 +40,10 @@ func (s *Server) publishPermissionReplied(sessionID, requestID, reply string) {
 // finish) and blocks until the assistant message is completed. It returns the
 // final {info, parts} for the assistant message.
 func (s *Server) runGenerationSync(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
+	return s.runGenerationSyncWithOptions(sessionID, parentID, resumeID, providerID, modelID, texts, images, system, agent, generationOptions{})
+}
+
+func (s *Server) runGenerationSyncWithOptions(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, opts generationOptions) (session.MessageWithParts, bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(sessionID, cancel)
 	defer func() {
@@ -36,11 +51,11 @@ func (s *Server) runGenerationSync(sessionID, parentID, resumeID, providerID, mo
 		cancel()
 	}()
 
-	return s.runGenerationSyncCtx(ctx, sessionID, parentID, resumeID, providerID, modelID, texts, images, system, agent)
+	return s.runGenerationSyncCtx(ctx, sessionID, parentID, resumeID, providerID, modelID, texts, images, system, agent, opts)
 }
 
 // runGenerationSyncCtx executes the core of runGenerationSync using a provided context.
-func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent) (session.MessageWithParts, bool) {
+func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, opts generationOptions) (session.MessageWithParts, bool) {
 	// 1. Create the assistant message
 	mode := agent.Mode
 	if mode == "" {
@@ -49,7 +64,7 @@ func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, 
 	if providerID == "" {
 		providerID = s.configuredProviderID
 	}
-	
+
 	var asst session.MessageWithParts
 	var ok bool
 	if resumeID != "" {
@@ -79,6 +94,9 @@ func (s *Server) runGenerationSyncCtx(ctx context.Context, sessionID, parentID, 
 	}
 
 	// 3. Run the agent loop
+	if !opts.empty() {
+		ctx = context.WithValue(ctx, generationOptionsContextKey{}, opts)
+	}
 	finishReason := s.runAgentLoop(ctx, sessionID, asst.Info.ID, parentID, modelID, texts, images, system, agent)
 
 	// Record terminal reason and compute final step cost for the step-finish part.
@@ -121,7 +139,7 @@ func (s *Server) runGenerationAsync(sessionID, parentID, resumeID, providerID, m
 // queue is currently empty, it starts the turn immediately. It returns the
 // admitted sequence number and true if admitted. It returns false if
 // delivery=="steer" and the session is already busy.
-func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string) (uint64, bool) {
+func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID string, texts, images []string, system string, agent Agent, delivery string, taskDone chan struct{}, opts ...generationOptions) (uint64, bool) {
 	s.sesMu.Lock()
 	defer s.sesMu.Unlock()
 
@@ -140,6 +158,11 @@ func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID
 
 	seq := s.store.NextSeq()
 
+	options := generationOptions{}
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+
 	task := &generationTask{
 		parentID:   parentID,
 		resumeID:   resumeID,
@@ -149,6 +172,8 @@ func (s *Server) startOrQueue(sessionID, parentID, resumeID, providerID, modelID
 		images:     images,
 		system:     system,
 		agent:      agent,
+		done:       taskDone,
+		options:    options,
 	}
 
 	w.queue = append(w.queue, task)
@@ -169,7 +194,7 @@ func (s *Server) processQueue(w *sessionWork) {
 			w.draining = false
 			w.running = false
 			s.sesMu.Unlock()
-			// Publish idle events so the TUI knows we're done
+			// No pending tasks: publish idle events and exit
 			s.bus.Publish(event.NewSessionStatus(w.sessionID, map[string]string{"type": "idle"}))
 			s.bus.Publish(event.NewSessionIdle(w.sessionID))
 			return
@@ -182,8 +207,12 @@ func (s *Server) processQueue(w *sessionWork) {
 		// Publish busy status
 		s.bus.Publish(event.NewSessionStatus(w.sessionID, map[string]string{"type": "busy"}))
 
-		s.runGenerationSync(w.sessionID, task.parentID, task.resumeID, task.providerID, task.modelID, task.texts, task.images, task.system, task.agent)
+		s.runGenerationSyncWithOptions(w.sessionID, task.parentID, task.resumeID, task.providerID, task.modelID, task.texts, task.images, task.system, task.agent, task.options)
+		if task.done != nil {
+			close(task.done)
+		}
 	}
+
 }
 
 type generationTask struct {
@@ -195,6 +224,8 @@ type generationTask struct {
 	images     []string
 	system     string
 	agent      Agent
+	done       chan struct{}
+	options    generationOptions
 }
 
 type sessionWork struct {

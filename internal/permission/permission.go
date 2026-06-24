@@ -162,6 +162,8 @@ func (s *Store) remove(id string) {
 
 func normalizeReply(r string) string {
 	switch r {
+	case "allow":
+		return "once"
 	case "once", "always", "reject":
 		return r
 	default:

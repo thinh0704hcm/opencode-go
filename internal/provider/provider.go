@@ -87,10 +87,12 @@ type ToolCall struct {
 
 // ChatRequest is a streaming chat request (architecture §3.1).
 type ChatRequest struct {
-	Model    string
-	Messages []ChatMessage
-	System   string
-	Tools    []ToolSchema
+	Model           string
+	Messages        []ChatMessage
+	System          string
+	Tools           []ToolSchema
+	ReasoningEffort string
+	ExtraBody       map[string]any
 	// MaxTokens is the output-token budget (OpenAI max_tokens). Mirrors the AI
 	// SDK, which sends max_tokens = maxOutputTokens. The field is only emitted
 	// when > 0; any value < 1 is dropped to avoid the upstream "max_tokens must
@@ -100,9 +102,12 @@ type ChatRequest struct {
 
 // Usage carries token accounting parsed from a provider stream's usage object.
 type Usage struct {
-	Input  int
-	Output int
-	Total  int
+	Input      int
+	Output     int
+	Total      int
+	Reasoning  int
+	CacheRead  int
+	CacheWrite int
 }
 
 // ChatChunk is one streamed delta from the provider.

@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"time"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/opencode-go/opencode-go/internal/event"
 	"github.com/opencode-go/opencode-go/internal/provider"
@@ -42,14 +42,14 @@ func (p *abortTestProvider) StreamChat(ctx context.Context, req provider.ChatReq
 			return
 		}
 		select {
-			case out <- provider.ChatChunk{TextDelta: "final"}:
-			case <-ctx.Done():
-				return
-			}
+		case out <- provider.ChatChunk{TextDelta: "final"}:
+		case <-ctx.Done():
+			return
+		}
 		select {
-			case out <- provider.ChatChunk{FinishReason: "stop"}:
-			case <-ctx.Done():
-			}
+		case out <- provider.ChatChunk{FinishReason: "stop"}:
+		case <-ctx.Done():
+		}
 	}()
 	return out, nil
 }
@@ -66,8 +66,8 @@ func (t abortTestTool) Mutating() bool { return false }
 func (t abortTestTool) Execute(ctx context.Context, input json.RawMessage, sb *tool.Sandbox) (tool.Result, error) {
 	if t.done != nil {
 		select {
-			case t.done <- t.name:
-			default:
+		case t.done <- t.name:
+		default:
 		}
 	}
 	if t.waitCtx {
@@ -162,7 +162,7 @@ func TestAgentLoopAbortBeforeFirstTurn(t *testing.T) {
 
 func TestAgentLoopAbortBetweenToolCalls(t *testing.T) {
 	done := make(chan string, 2)
-	calls := []provider.ToolCall{{ID: "c1", Name: "first", Input: json.RawMessage(`{}`)},{ID: "c2", Name: "second", Input: json.RawMessage(`{}`)}}
+	calls := []provider.ToolCall{{ID: "c1", Name: "first", Input: json.RawMessage(`{}`)}, {ID: "c2", Name: "second", Input: json.RawMessage(`{}`)}}
 	srv, _ := newAbortLoopServer(t, calls, done, true)
 	sub, cancelSub := srv.bus.Subscribe()
 	defer cancelSub()
@@ -233,7 +233,7 @@ func TestDetectDoomLoop_FewerThanThreshold(t *testing.T) {
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
 	// Only 2 tool parts — below threshold of 3
-	inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"ls"}}
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "ls"}}
 	addToolParts(t, srv, sessionID, messageID, "bash", inputs, nil)
 
 	if srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
@@ -245,7 +245,7 @@ func TestDetectDoomLoop_ThreeIdenticalCompleted(t *testing.T) {
 	srv, _ := newAbortLoopServer(t, nil, nil, false)
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
-	inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"ls"}, {"cmd":"ls"}}
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "ls"}, {"cmd": "ls"}}
 	addToolParts(t, srv, sessionID, messageID, "bash", inputs, nil)
 
 	if !srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
@@ -258,11 +258,11 @@ func TestDetectDoomLoop_DifferentToolNames(t *testing.T) {
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
 	// Mix tool names
-inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"ls"}, {"cmd":"ls"}}
-statuses := []string{"completed", "completed", "completed"}
-addToolParts(t, srv, sessionID, messageID, "bash", inputs[:1], statuses[:1])
-addToolParts(t, srv, sessionID, messageID, "bash", inputs[1:2], statuses[1:2])
-p, ok := srv.store.AppendToolPart(sessionID, messageID, "other_tool", "doom_other_0", "completed", inputs[2], "output")
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "ls"}, {"cmd": "ls"}}
+	statuses := []string{"completed", "completed", "completed"}
+	addToolParts(t, srv, sessionID, messageID, "bash", inputs[:1], statuses[:1])
+	addToolParts(t, srv, sessionID, messageID, "bash", inputs[1:2], statuses[1:2])
+	p, ok := srv.store.AppendToolPart(sessionID, messageID, "other_tool", "doom_other_0", "completed", inputs[2], "output")
 	if !ok {
 		t.Fatal("AppendToolPart failed")
 	}
@@ -277,8 +277,8 @@ func TestDetectDoomLoop_DifferentInputs(t *testing.T) {
 	srv, _ := newAbortLoopServer(t, nil, nil, false)
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
-inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"pwd"}, {"cmd":"ls"}}
-addToolParts(t, srv, sessionID, messageID, "bash", inputs, nil)
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "pwd"}, {"cmd": "ls"}}
+	addToolParts(t, srv, sessionID, messageID, "bash", inputs, nil)
 
 	if srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
 		t.Fatal("should not detect doom loop when inputs differ")
@@ -289,9 +289,9 @@ func TestDetectDoomLoop_PendingStatus(t *testing.T) {
 	srv, _ := newAbortLoopServer(t, nil, nil, false)
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
-inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"ls"}, {"cmd":"ls"}}
-statuses := []string{"completed", "completed", "pending"}
-addToolParts(t, srv, sessionID, messageID, "bash", inputs, statuses)
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "ls"}, {"cmd": "ls"}}
+	statuses := []string{"completed", "completed", "pending"}
+	addToolParts(t, srv, sessionID, messageID, "bash", inputs, statuses)
 
 	if srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
 		t.Fatal("should not detect doom loop when last part is pending")
@@ -302,9 +302,9 @@ func TestDetectDoomLoop_RunningStatus(t *testing.T) {
 	srv, _ := newAbortLoopServer(t, nil, nil, false)
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
-inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"ls"}, {"cmd":"ls"}}
-statuses := []string{"completed", "completed", "running"}
-addToolParts(t, srv, sessionID, messageID, "bash", inputs, statuses)
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "ls"}, {"cmd": "ls"}}
+	statuses := []string{"completed", "completed", "running"}
+	addToolParts(t, srv, sessionID, messageID, "bash", inputs, statuses)
 
 	if srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
 		t.Fatal("should not detect doom loop when last part is running")
@@ -317,7 +317,7 @@ func TestDetectDoomLoop_MixedTextAndToolParts(t *testing.T) {
 
 	// Add text part first, then 3 identical tool parts
 	srv.store.AppendTextDelta(sessionID, messageID, "text", "thinking...")
-	inputs := []map[string]any{{"cmd":"ls"}, {"cmd":"ls"}, {"cmd":"ls"}}
+	inputs := []map[string]any{{"cmd": "ls"}, {"cmd": "ls"}, {"cmd": "ls"}}
 	addToolParts(t, srv, sessionID, messageID, "bash", inputs, nil)
 
 	if !srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
@@ -330,7 +330,7 @@ func TestDetectDoomLoop_JSONKeyOrdering(t *testing.T) {
 	sessionID, _, messageID := newAbortLoopMessage(t, srv)
 
 	// Store with one key ordering, query with different ordering
-	inputs := []map[string]any{{"b":2,"a":1}, {"b":2,"a":1}, {"b":2,"a":1}}
+	inputs := []map[string]any{{"b": 2, "a": 1}, {"b": 2, "a": 1}, {"b": 2, "a": 1}}
 	addToolParts(t, srv, sessionID, messageID, "bash", inputs, nil)
 
 	if !srv.detectDoomLoop(sessionID, messageID, "bash", json.RawMessage(`{"a":1,"b":2}`)) {
@@ -338,6 +338,40 @@ func TestDetectDoomLoop_JSONKeyOrdering(t *testing.T) {
 	}
 }
 
+// New cross-turn doom loop detection tests
+func TestDetectDoomLoop_CrossTurn(t *testing.T) {
+    srv, _ := newAbortLoopServer(t, nil, nil, false)
+    sessionID, _, _ := newAbortLoopMessage(t, srv)
+    // Create 3 separate assistant messages, each with one identical tool part.
+    for i := 0; i < doomLoopThreshold; i++ {
+        msg, _ := srv.store.NewAssistantMessage(sessionID, "", "", "", "test-agent", "build")
+        inputs := []map[string]any{{"cmd": "ls"}}
+        addToolParts(t, srv, sessionID, msg.Info.ID, "bash", inputs, nil)
+    }
+    msgs, _ := srv.store.Messages(sessionID)
+    lastMsgID := msgs[len(msgs)-1].Info.ID
+    if !srv.detectDoomLoop(sessionID, lastMsgID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
+        t.Fatal("should detect doom loop across turns")
+    }
+}
+
+func TestDetectDoomLoop_CrossTurn_DifferentInputs(t *testing.T) {
+    srv, _ := newAbortLoopServer(t, nil, nil, false)
+    sessionID, _, _ := newAbortLoopMessage(t, srv)
+    // 2 identical + 1 different
+    for i := 0; i < 2; i++ {
+        msg, _ := srv.store.NewAssistantMessage(sessionID, "", "", "", "test-agent", "build")
+        addToolParts(t, srv, sessionID, msg.Info.ID, "bash", []map[string]any{{"cmd": "ls"}}, nil)
+    }
+    msg, _ := srv.store.NewAssistantMessage(sessionID, "", "", "", "test-agent", "build")
+    addToolParts(t, srv, sessionID, msg.Info.ID, "bash", []map[string]any{{"cmd": "pwd"}}, nil)
+    msgs, _ := srv.store.Messages(sessionID)
+    lastMsgID := msgs[len(msgs)-1].Info.ID
+    if srv.detectDoomLoop(sessionID, lastMsgID, "bash", json.RawMessage(`{"cmd":"ls"}`)) {
+        t.Fatal("should not detect doom loop when inputs differ across turns")
+    }
+}
+ 
 // Doom-loop integration test: verifies the full permission flow end-to-end.
 // Provider returns 3 identical tool calls per turn. After the first turn,
 // the store has 3 identical completed parts. On the second turn, each new
@@ -389,7 +423,7 @@ func (p *doomLoopProvider) StreamChat(ctx context.Context, req provider.ChatRequ
 }
 
 func TestDoomLoopIntegration_Reject(t *testing.T) {
-	calls := []provider.ToolCall{{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}}
+	calls := []provider.ToolCall{{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}, {Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}, {Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}}
 
 	p := &doomLoopProvider{calls: calls}
 	r := tool.NewRegistry()
@@ -441,10 +475,19 @@ DONE_REJECT:
 	if errorParts == 0 {
 		t.Fatal("expected at least one error tool part after doom-loop reject")
 	}
+	// Verify runAgentLoop returned "stop"
+	select {
+	case result := <-doneCh:
+		if result != "stop" {
+			t.Fatalf("expected result \"stop\" after doom-loop reject, got %q", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for runAgentLoop result after doom-loop reject")
+	}
 }
 
 func TestDoomLoopIntegration_Allow(t *testing.T) {
-	calls := []provider.ToolCall{{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}}
+	calls := []provider.ToolCall{{Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}, {Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}, {Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)}}
 
 	p := &doomLoopProvider{calls: calls}
 	r := tool.NewRegistry()

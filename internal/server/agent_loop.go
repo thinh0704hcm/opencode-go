@@ -17,8 +17,9 @@ import (
 // before the gate default-denies.
 const permTimeout = 90 * time.Second
 
-// doomLoopThreshold is the number of consecutive identical tool calls that
-// triggers the doom-loop permission prompt, matching TS processor.ts:35.
+// doomLoopThreshold is the number of consecutive identical completed tool calls
+// (across assistant messages in the session) that triggers the doom-loop permission
+// prompt. Scope: session-wide, cross-turn. Tuning knob, not loop-stop policy.
 const doomLoopThreshold = 3
 
 // runAgentLoop drives the bounded, permission-gated tool-calling loop against an
@@ -106,6 +107,17 @@ func (s *Server) chatHistory(sessionID, currentUserMsgID string, currentTexts []
 		out = append(out, provider.ChatMessage{Role: role, Content: content})
 	}
 
+	// Insert active compression summary as system message if present
+	if blocks := s.store.CompressionBlocks(sessionID); len(blocks) > 0 {
+		for i := len(blocks) - 1; i >= 0; i-- {
+			b := blocks[i]
+			if b.Active && b.Summary != "" {
+				out = append([]provider.ChatMessage{{Role: "system", Content: provider.TextContent(b.Summary)}}, out...)
+				break
+			}
+		}
+	}
+
 	if len(out) == 0 || out[len(out)-1].Role != "user" {
 		out = append(out, provider.ChatMessage{Role: "user", Content: provider.MultimodalContent(joinTexts(currentTexts), currentImages)})
 	}
@@ -148,33 +160,39 @@ func joinTexts(texts []string) string {
 	return sb.String()
 }
 
-// detectDoomLoop checks whether the last N tool parts on the current assistant
-// message are identical (same tool name + same JSON input), which indicates the
-// model is stuck in a repeat loop. Returns true if doom loop is detected.
 func (s *Server) detectDoomLoop(sessionID, messageID, toolName string, input []byte) bool {
-	parts := s.store.MessageParts(sessionID, messageID)
-	// Filter to only tool parts, ignore text/step-start etc.
-	var toolParts []session.Part
-	for _, p := range parts {
-		if p.Type == "tool" {
-			toolParts = append(toolParts, p)
-		}
-	}
-	if len(toolParts) < doomLoopThreshold {
+	// Collect completed tool parts from ALL messages in the session (cross-turn).
+	var recentCompleted []session.Part
+	msgs, ok := s.store.Messages(sessionID)
+	if !ok {
 		return false
 	}
-	recent := toolParts[len(toolParts)-doomLoopThreshold:]
-	// Normalize input JSON for comparison.
+	for _, msg := range msgs {
+		if msg.Info.Role != "assistant" {
+			continue
+		}
+		for _, p := range s.store.MessageParts(sessionID, msg.Info.ID) {
+			if p.Type != "tool" {
+				continue
+			}
+			if p.State == nil || p.State.Status == "pending" || p.State.Status == "running" {
+				continue
+			}
+			recentCompleted = append(recentCompleted, p)
+		}
+	}
+	if len(recentCompleted) < doomLoopThreshold {
+		return false
+	}
+	recent := recentCompleted[len(recentCompleted)-doomLoopThreshold:]
+	// Normalize incoming input.
 	var normalizedInput map[string]any
 	if json.Unmarshal(input, &normalizedInput) != nil {
 		return false
 	}
 	inputStr, _ := json.Marshal(normalizedInput)
 	for _, p := range recent {
-		if p.Type != "tool" || p.Tool != toolName {
-			return false
-		}
-		if p.State == nil || p.State.Status == "pending" {
+		if p.Tool != toolName {
 			return false
 		}
 		partInput, _ := json.Marshal(p.State.Input)
@@ -184,7 +202,6 @@ func (s *Server) detectDoomLoop(sessionID, messageID, toolName string, input []b
 	}
 	return true
 }
-
 func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsgID, modelID string, texts []string, images []string, callerSystem string, agent Agent, prebuiltMessages ...[]provider.ChatMessage) string {
 	var messages []provider.ChatMessage
 	if len(prebuiltMessages) > 0 && prebuiltMessages[0] != nil {
@@ -209,9 +226,13 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		providerID = s.provider.ID()
 	}
 	if idx := strings.Index(modelID, "/"); idx > 0 && idx < len(modelID)-1 {
-		providerID = modelID[:idx]
-		modelID = modelID[idx+1:]
+		prefix := modelID[:idx]
+		if prefix != "cx" && prefix != "ag" && prefix != "cc" {
+			providerID = prefix
+			modelID = modelID[idx+1:]
+		}
 	}
+	opts, _ := ctx.Value(generationOptionsContextKey{}).(generationOptions)
 
 	// commitLen tracks how many entries in messages were present at the start of
 	// the current iteration. A mid-stream retry is only safe when no tool
@@ -239,19 +260,23 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		stepStartOutput := prevOutput
 
 		req := provider.ChatRequest{
-			Model:     modelID,
-			Messages:  messages,
-			System: s.DCPHooks().SystemPrompt(s.workdir, combineSystem(buildSystemPrompt(s.workdir, agent.Prompt), callerSystem)),
-			Tools:     toolSchemas(s.tools, agent.toolAllowed),
-			MaxTokens: s.maxTokens,
+			Model:           modelID,
+			Messages:        messages,
+			System:          s.DCPHooks().SystemPrompt(s.workdir, combineSystem(buildSystemPrompt(s.workdir, agent.Prompt), callerSystem)),
+			Tools:           toolSchemas(s.tools, agent.toolAllowed),
+			ReasoningEffort: opts.reasoningEffort,
+			ExtraBody:       opts.extraBody,
+			MaxTokens:       s.maxTokens,
 		}
 
 		var calls []provider.ToolCall
 		var finishReason string
 		var reasoningID string
 		var reasoning strings.Builder
+		var reasoningDeltas []string
 		var textID string
 		var textBuf strings.Builder
+		var textDeltas []string
 		var streamErr error
 
 		// streamTimeout caps how long a single StreamChat attempt may run before
@@ -274,8 +299,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 				finishReason = ""
 				reasoningID = ""
 				reasoning.Reset()
+				reasoningDeltas = nil
 				textID = ""
 				textBuf.Reset()
+				textDeltas = nil
 				s.bus.Publish(event.NewSessionNextRetried(sessionID, attempt, streamErr.Error(), true))
 			}
 
@@ -316,43 +343,36 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 					if chunk.TextDelta != "" {
 						if textID == "" {
 							textID = event.NewID("txt")
-							s.bus.Publish(event.NewSessionNextTextStarted(sessionID, messageID, textID))
 						}
 						textBuf.WriteString(chunk.TextDelta)
-						s.bus.Publish(event.NewSessionNextTextDelta(sessionID, messageID, textID, chunk.TextDelta))
-						s.emitDelta(sessionID, messageID, "text", chunk.TextDelta)
+						textDeltas = append(textDeltas, chunk.TextDelta)
 					}
 					if chunk.ReasoningDelta != "" {
 						if reasoningID == "" {
 							reasoningID = event.NewID("rsn")
-							s.bus.Publish(event.NewSessionNextReasoningStarted(sessionID, messageID, reasoningID))
 						}
 						reasoning.WriteString(chunk.ReasoningDelta)
-						s.bus.Publish(event.NewSessionNextReasoningDelta(sessionID, messageID, reasoningID, chunk.ReasoningDelta))
-						s.emitDelta(sessionID, messageID, "reasoning", chunk.ReasoningDelta)
+						reasoningDeltas = append(reasoningDeltas, chunk.ReasoningDelta)
 					}
 					if chunk.ToolCall != nil {
 						calls = append(calls, *chunk.ToolCall)
 					}
 					if chunk.Usage != nil {
-						s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total)
+						s.store.SetAssistantUsage(sessionID, messageID, chunk.Usage.Input, chunk.Usage.Output, chunk.Usage.Total, chunk.Usage.Reasoning, chunk.Usage.CacheRead, chunk.Usage.CacheWrite)
 					}
 					if chunk.FinishReason != "" {
 						finishReason = chunk.FinishReason
 					}
 				}
 			}
-	streamDone:
-
+		streamDone:
 
 			attemptCancel()
 
 			// Retry on stream error only when no tool results have been committed
 			// (no side effects to undo). Give up if retries exhausted.
 			if streamErr != nil {
-				if attempt < maxStreamRetries-1 && len(messages) == commitLen {
-					continue
-				}
+				s.store.DropTextAndReasoningParts(sessionID, messageID)
 				s.bus.Publish(event.NewSessionError(sessionID, map[string]any{
 					"name": "UnknownError",
 					"data": map[string]any{"message": scrubError(streamErr.Error())},
@@ -363,16 +383,28 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 		} // end retry loop
 
 		if reasoningID != "" {
+			s.bus.Publish(event.NewSessionNextReasoningStarted(sessionID, messageID, reasoningID))
+			for _, delta := range reasoningDeltas {
+				s.bus.Publish(event.NewSessionNextReasoningDelta(sessionID, messageID, reasoningID, delta))
+				s.emitDelta(sessionID, messageID, "reasoning", delta)
+			}
 			s.bus.Publish(event.NewSessionNextReasoningEnded(sessionID, messageID, reasoningID, reasoning.String()))
 			reasoningID = ""
 			reasoning.Reset()
+			reasoningDeltas = nil
 		}
 
 		if textID != "" {
-				    finalText := s.DCPHooks().TextComplete(textBuf.String())
-				    s.bus.Publish(event.NewSessionNextTextEnded(sessionID, messageID, textID, finalText))
+			s.bus.Publish(event.NewSessionNextTextStarted(sessionID, messageID, textID))
+			for _, delta := range textDeltas {
+				s.bus.Publish(event.NewSessionNextTextDelta(sessionID, messageID, textID, delta))
+				s.emitDelta(sessionID, messageID, "text", delta)
+			}
+			finalText := s.DCPHooks().TextComplete(textBuf.String())
+			s.bus.Publish(event.NewSessionNextTextEnded(sessionID, messageID, textID, finalText))
 			textID = ""
 			textBuf.Reset()
+			textDeltas = nil
 		}
 
 		// No tool calls: the model produced its final text turn.
@@ -391,10 +423,10 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 					prevOutput = tok.Output
 				}
 				s.bus.Publish(event.NewSessionNextStepEnded(sessionID, messageID, finishReason, stepCost, tokens))
-		// Auto-compaction: if token usage exceeds DCP threshold, trigger compaction.
-		if tok != nil && s.isDCPOverflow(s.workdir, tok) {
-			s.compactSession(sessionID, compactRequest{})
-		}
+				// Auto-compaction: if token usage exceeds DCP threshold, trigger compaction.
+				if tok != nil && s.isDCPOverflow(s.workdir, tok) {
+					s.compactSession(sessionID, compactRequest{Reason: "auto"})
+				}
 			}
 			return finishReason
 		}
@@ -467,8 +499,8 @@ func (s *Server) runAgentLoop(ctx context.Context, sessionID, messageID, userMsg
 					}
 				}
 
-part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, partProviderID, partModelID, "")
-				 s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
+				part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentName, partProviderID, partModelID, "")
+				s.bus.Publish(event.NewMessagePartUpdated(sessionID, part, time.Now().UnixMilli()))
 
 				// Also create a tool part to track lifecycle of the subtask.
 				var subtoolInput map[string]any
@@ -493,25 +525,25 @@ part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentNa
 			if s.detectDoomLoop(sessionID, messageID, call.Name, call.Input) {
 				doomReq := s.perms.Ask("per_"+call.ID+"_doom", permSessID, "doom_loop")
 				doomObj := map[string]any{
-					"id":        doomReq.ID,
-					"sessionID": permSessID,
+					"id":         doomReq.ID,
+					"sessionID":  permSessID,
 					"permission": "doom_loop",
 					"patterns":   []any{"Continue after repeated failures?"},
 					"metadata":   map[string]any{"tool": call.Name},
-					"tool": map[string]any{"messageID": messageID, "callID": call.ID},
+					"tool":       map[string]any{"messageID": messageID, "callID": call.ID},
 				}
 				s.bus.Publish(event.NewPermissionAsked(doomObj))
 				s.bus.Publish(event.NewPermissionUpdated(map[string]any{"id": doomReq.ID, "status": "pending", "request": doomObj, "response": nil}))
 				doomReply := s.perms.Wait(ctx, doomReq, permTimeout)
 				s.bus.Publish(event.NewPermissionReplied(permSessID, doomReq.ID, doomReply))
 				if doomReply == "reject" {
-					out := "doom loop detected: repeated identical tool calls"
+					out := "doom loop stopped"
 					p, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "error", toolInput, out)
 					s.bus.Publish(event.NewMessagePartUpdated(sessionID, p, time.Now().UnixMilli()))
 					messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
-					continue
+					return "stop"
 				}
-				// "once" or "always" → proceed to normal execution
+
 			}
 
 			part, _ := s.store.AppendToolPart(sessionID, messageID, call.Name, call.ID, "running", toolInput, "")
@@ -524,7 +556,6 @@ part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentNa
 				messages = append(messages, provider.ChatMessage{Role: "tool", ToolCallID: call.ID, Name: call.Name, Content: out})
 				continue
 			}
-
 
 			if needsPermission(s.tools, call.Name) &&
 				!s.perms.IsAllowed(sessionID, call.Name) &&
@@ -549,9 +580,9 @@ part, _ := s.store.AppendSubtaskPart(sessionID, messageID, prompt, desc, agentNa
 					"id":         preq.ID,
 					"sessionID":  permSessID,
 					"permission": call.Name,
-					"patterns":   []any{pattern},
-					"metadata":   map[string]any{},
-					"always":     []any{},
+					"patterns":   []any{call.Name},
+					"metadata":   map[string]any{"tool": call.Name, "input": toolInput},
+					"always":     []any{call.Name},
 					"tool": map[string]any{
 						"messageID": messageID,
 						"callID":    call.ID,

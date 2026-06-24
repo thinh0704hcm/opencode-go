@@ -28,16 +28,17 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 
 // handleConfigUpdate serves PATCH /config.
 func (s *Server) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
-    // Require JSON content type
     if !requireJSON(w, r) {
         return
     }
-    // Validate request body is exactly valid JSON (no trailing junk).
     var body map[string]any
     if !decodeStrictBody(w, r, &body, true) { // allow empty body
         return
     }
-    writeJSON(w, http.StatusOK, map[string]any{})
+    cfg := config.Load(directoryOf(r))
+    out := cfg.Defaulted()
+    maskSecretsDeep(out)
+    writeJSON(w, http.StatusOK, out)
 }
 
 // configProvidersResponse is the GET /config/providers body.

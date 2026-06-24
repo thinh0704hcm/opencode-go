@@ -114,6 +114,16 @@ func New(opts Options) *Server {
 	logger.Debug("tool registered", "name", "task")
 	srv.tools.Register(todoWriteTool{srv: srv})
 	srv.tools.Register(todoReadTool{srv: srv})
+	// Web tools backed by the 9Router gateway (search + URL→markdown fetch),
+	// reusing the chat provider's gateway/key (or NINEROUTER_URL/NINEROUTER_KEY).
+	if base, key := resolveNineRouter(opts.Provider); base != "" {
+		hc := &http.Client{Timeout: 60 * time.Second}
+		srv.tools.Unregister("webfetch") // replace the naive http.GET fetch
+		srv.tools.Register(tool.NewWebFetch9RouterTool(base, key, hc))
+		srv.tools.Register(tool.NewWebSearchTool(base, key, hc))
+		logger.Debug("tool registered", "name", "webfetch (9router)")
+		logger.Debug("tool registered", "name", "websearch")
+	}
 	// Wire MCP tool-list change notifications.
 	mcpMgr.SetToolsChangedCallback(func(server string) {
 		// Unregister old MCP tools for this server, then register current adapters.
@@ -129,6 +139,34 @@ func New(opts Options) *Server {
 		srv.bus.Publish(event.NewToolsChanged(server))
 	})
 	return srv
+}
+
+// resolveNineRouter returns the 9Router v1 base URL (ending in /v1) and API key
+// for the web tools. Prefers NINEROUTER_URL/NINEROUTER_KEY env, otherwise derives
+// them from the chat provider's gateway. Returns an empty base when unavailable.
+func resolveNineRouter(p provider.Provider) (string, string) {
+	base := strings.TrimSpace(os.Getenv("NINEROUTER_URL"))
+	key := strings.TrimSpace(os.Getenv("NINEROUTER_KEY"))
+	if base != "" {
+		base = strings.TrimRight(base, "/")
+		if !strings.HasSuffix(base, "/v1") {
+			base += "/v1"
+		}
+		return base, key
+	}
+	type gateway interface {
+		BaseURL() string
+		APIKey() string
+	}
+	if op, ok := p.(gateway); ok {
+		if b := strings.TrimRight(op.BaseURL(), "/"); b != "" {
+			if key == "" {
+				key = op.APIKey()
+			}
+			return b, key
+		}
+	}
+	return "", ""
 }
 
 // Handler returns the HTTP handler (router) for the server.
@@ -153,22 +191,22 @@ func (s *Server) clearCancel(sessionID string) {
 // cancelSession cancels the in-flight turn for a session, returning true if one
 // was registered.
 func (s *Server) cancelSession(sessionID string) bool {
-    // Session busy check helper
-    // Returns true if a generation is currently running for the session.
-    // Used by handlers to guard against concurrent operations.
-    // (wrapper defined below)
-    //
-    // Note: sesMu is a sync.Mutex, not RWMutex, so we lock for safe access.
-    //
-    // sessionBusy is defined after this method.
-    //
-    // -----
-    // sessionBusy implementation follows after cancelSession.
-    // -----
-    // (no functional change to cancelSession itself)
-    //
-    // Added comment only, method unchanged.
-    //
+	// Session busy check helper
+	// Returns true if a generation is currently running for the session.
+	// Used by handlers to guard against concurrent operations.
+	// (wrapper defined below)
+	//
+	// Note: sesMu is a sync.Mutex, not RWMutex, so we lock for safe access.
+	//
+	// sessionBusy is defined after this method.
+	//
+	// -----
+	// sessionBusy implementation follows after cancelSession.
+	// -----
+	// (no functional change to cancelSession itself)
+	//
+	// Added comment only, method unchanged.
+	//
 	s.cancelMu.Lock()
 	c, ok := s.cancels[sessionID]
 	s.cancelMu.Unlock()
@@ -183,10 +221,10 @@ func (s *Server) cancelSession(sessionID string) bool {
 // shutdown. Bind address is enforced by the caller (architecture §11).
 // sessionBusy returns true if the session has an active generation running.
 func (s *Server) sessionBusy(id string) bool {
-    s.sesMu.Lock()
-    defer s.sesMu.Unlock()
-    w, ok := s.sesQueue[id]
-    return ok && w.running
+	s.sesMu.Lock()
+	defer s.sesMu.Unlock()
+	w, ok := s.sesQueue[id]
+	return ok && w.running
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -222,16 +260,30 @@ const heartbeatInterval = 15 * time.Second
 // loadMCPSection loads the "mcp" config section (server name -> config) from the
 // workdir, returning nil when absent.
 func loadMCPSection(workdir string) map[string]any {
-	// MCP auto-connect is opt-in: spawning configured MCP servers at boot is
-	// off by default so a restart never unexpectedly launches heavy subprocesses
-	// (browsers, etc.) on constrained hosts. Set OPENCODE_GO_MCP=1 to enable.
-	if v := os.Getenv("OPENCODE_GO_MCP"); v != "1" && v != "true" {
-		return nil
-	}
 	cfg := config.Load(workdir)
 	if cfg.Raw == nil {
 		return nil
 	}
 	section, _ := cfg.Raw["mcp"].(map[string]any)
+
+	// MCP auto-connect is opt-in: spawning configured MCP servers at boot is
+	// off by default so a restart never unexpectedly launches heavy subprocesses
+	// (browsers, etc.) on constrained hosts. Set OPENCODE_GO_MCP=1 to enable,
+	// or set "enabled": true on individual server entries to bypass the env gate.
+	if v := os.Getenv("OPENCODE_GO_MCP"); v != "1" && v != "true" {
+		// Check if any server has explicit enabled:true in config.
+		hasExplicit := false
+		for _, v := range section {
+			if srv, ok := v.(map[string]any); ok {
+				if e, ok := srv["enabled"].(bool); ok && e {
+					hasExplicit = true
+					break
+				}
+			}
+		}
+		if !hasExplicit {
+			return nil
+		}
+	}
 	return section
 }

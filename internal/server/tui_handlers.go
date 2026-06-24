@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"context"
 	"github.com/opencode-go/opencode-go/internal/event"
 	"io"
@@ -49,4 +50,48 @@ func (s *Server) handleTUIOK(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (s *Server) handleTUIOKBool(w http.ResponseWriter, r *http.Request) {
+    if r.Body != nil {
+        _, _ = io.Copy(io.Discard, r.Body)
+    }
+    writeJSON(w, http.StatusOK, true)
+}
+
+func (s *Server) handleTUIAppendPrompt(w http.ResponseWriter, r *http.Request) {
+    var body struct {
+        Text string `json:"text"`
+    }
+    if r.Body != nil {
+        json.NewDecoder(r.Body).Decode(&body)
+    }
+    s.bus.Publish(event.Event{ID: event.NewID("evt"), Type: "tui.prompt.append", Properties: map[string]any{"text": body.Text}})
+    writeJSON(w, http.StatusOK, true)
+}
+
+func (s *Server) handleTUIShowToast(w http.ResponseWriter, r *http.Request) {
+    var body struct {
+        Message string `json:"message"`
+    }
+    if r.Body != nil {
+        json.NewDecoder(r.Body).Decode(&body)
+    }
+    s.bus.Publish(event.Event{ID: event.NewID("evt"), Type: "tui.toast.show", Properties: map[string]any{"message": body.Message}})
+    writeJSON(w, http.StatusOK, true)
+}
+
+func (s *Server) handleTUIExecuteCommand(w http.ResponseWriter, r *http.Request) {
+    var body struct {
+        Command string `json:"command"`
+    }
+    if r.Body != nil {
+        json.NewDecoder(r.Body).Decode(&body)
+    }
+    // Upstream publishes a tui.command.execute event for the TUI client to act
+    // on and returns true; it never 501s (a 501 here broke every TUI command).
+    // Note: the TUI's /compact does NOT route through here — it calls
+    // POST /session/{id}/summarize directly (see handleSessionSummarize).
+    s.bus.Publish(event.Event{ID: event.NewID("evt"), Type: "tui.command.execute", Properties: map[string]any{"command": body.Command}})
+    writeJSON(w, http.StatusOK, true)
 }
