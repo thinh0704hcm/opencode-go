@@ -177,16 +177,6 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 
 		s.bus.Publish(event.NewSessionCreated(childSessionID, childSession))
 
-		// Publish initial event to child session.
-		s.bus.Publish(event.NewMessageUpdated(childSessionID, userMsg.Info, false))
-		for _, part := range userMsg.Parts {
-			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, part, time.Now().UnixMilli()))
-		}
-
-		s.bus.Publish(event.NewMessageUpdated(childSessionID, asst.Info, false))
-		if len(asst.Parts) > 0 {
-			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, asst.Parts[0], time.Now().UnixMilli()))
-		}
 
 		s.sesMu.Lock()
 		w := s.sesQueue[childSessionID]
@@ -201,6 +191,16 @@ func (s *Server) runDelegated(ctx context.Context, input json.RawMessage) (tool.
 		s.sesMu.Unlock()
 
 		s.bus.Publish(event.NewSessionStatus(childSessionID, map[string]string{"type": "busy"}))
+		// Publish initial event to child session after busy status.
+		s.bus.Publish(event.NewMessageUpdated(childSessionID, userMsg.Info, false))
+		for _, part := range userMsg.Parts {
+			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, part, time.Now().UnixMilli()))
+		}
+
+		s.bus.Publish(event.NewMessageUpdated(childSessionID, asst.Info, false))
+		if len(asst.Parts) > 0 {
+			s.bus.Publish(event.NewMessagePartUpdated(childSessionID, asst.Parts[0], time.Now().UnixMilli()))
+		}
 
 		finishReason := s.runAgentLoop(subCtx, childSessionID, asst.Info.ID, userMsg.Info.ID, modelID, []string{prompt}, nil, "", agent)
 
